@@ -1,0 +1,83 @@
+flowchart LR
+    A[User Buys Ticket] -->|Sends SOL| B[CompanyPool Vault]
+    B --> C[Backend Issues Ticket]
+    C --> D[User Spins Wheel]
+    D --> E[Spin Result Stored]
+    E --> F{Result has Value?}
+    F -- Yes --> G[User Calls Claim]
+    G --> H[Reward Vault Pays SOL to User]
+
+
+Example: If ticket costs 1 SOL:
+
+70% chance: 0.1 SOL reward
+20% chance: 0.5 SOL reward
+10% chance: 2 SOL reward
+Expected payout: (0.7 × 0.1) + (0.2 × 0.5) + (0.1 × 2) = 0.37 SOL
+Profit margin: 1 - 0.37 = 0.63 SOL per ticket
+
+Technical Recommendations
+
+Frontend randomness: Use a secure random number generator on your frontend
+Probability validation: Ensure all probabilities sum to 100%
+Vault management: Regularly withdraw profits to secure wallets
+Monitoring: Track metrics to ensure profitability
+
+
+Why You Need a Backend:
+
+Secure Randomness Generation - Frontend randomness can be manipulated
+Spin Result Validation - Verify results before blockchain submission
+Rate Limiting & Anti-Fraud - Prevent abuse and bot attacks
+Analytics & Monitoring - Track business metrics
+User Management - Handle user sessions and history
+Webhook Processing - Handle blockchain events
+Admin Dashboard - Manage pools and view statistics
+
+
+
+# Install dependencies
+npm install
+
+# Set up environment
+cp .env.example .env
+# Edit .env with your configurations
+
+# Start Redis (required)
+docker run -d -p 6379:6379 redis:alpine
+
+# Start MongoDB (required)
+docker run -d -p 27017:27017 mongo:latest
+
+# Run development server
+npm run dev
+
+
+
+Integration Flow:
+
+User buys ticket → Frontend calls blockchain
+User spins wheel → Frontend calls /api/spin/request
+Backend generates result → Returns signed result
+Frontend shows animation → Calls /api/spin/verify
+Submit to blockchain → Record spin result on-chain
+User claims reward → Blockchain transfers tokens
+
+
+
+
+Business Benefits:
+
+🎯 Guaranteed Profitability: Control exact probabilities
+📈 Analytics Dashboard: Track all metrics
+🚫 Fraud Prevention: Multiple security layers
+⚖️ Regulatory Compliance: Audit trails and transparency
+🔄 Easy Updates: Change probabilities without redeployment
+
+Optional Enhancements:
+
+Admin Dashboard (React/Vue frontend)
+Webhook integrations (Discord/Telegram notifications)
+Advanced analytics (profit/loss charts)
+A/B testing (different probability sets)
+VIP tiers (better odds for big spenders)
