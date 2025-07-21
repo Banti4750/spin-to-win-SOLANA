@@ -1,0 +1,31 @@
+initialize_company_pool
+during initialize we need
+fn initialize_company_pool(ticket_price ,company_name ,  company_image , array of struct<image , price , name , description  >  ){
+    apply algo and store items calculateProfitability globaly that can use during spin wheel
+}
+
+buy_ticket
+fn buy_ticket(ticket_price , company_name ){
+    make him eligible for spin wheel
+}
+
+record_spin_result
+fn record_spin_result(company_name){
+    calculate what he win through calculateProfitability
+    give him that item in claim_reward section
+}
+
+claim_reward
+fn claim_reward(items){
+    transfer fund to hid wallet
+}
+
+update_pool_status
+fn update_pool_status(){
+    call when buy and claim action held
+}
+
+withdraw_funds
+fn withdraw_funds{
+    admin able to withdraw fund from fat wallet
+}
