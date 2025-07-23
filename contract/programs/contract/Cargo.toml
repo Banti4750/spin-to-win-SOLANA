@@ -1,12 +1,12 @@
 [package]
-name = "contract"
+name = "company_pool"
 version = "0.1.0"
 description = "Created with Anchor"
 edition = "2021"
 
 [lib]
 crate-type = ["cdylib", "lib"]
-name = "contract"
+name = "company_pool"
 
 [features]
 default = []
@@ -15,8 +15,10 @@ no-entrypoint = []
 no-idl = []
 no-log-ix-name = []
 idl-build = ["anchor-lang/idl-build"]
+init-if-needed = []
 
 
 [dependencies]
-anchor-lang = "0.31.1"
-
+anchor-lang = "0.31.0"
+anchor-spl = "0.31.0"
+solana-program = "2.3.0"

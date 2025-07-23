@@ -29,3 +29,641 @@ withdraw_funds
 fn withdraw_funds{
     admin able to withdraw fund from fat wallet
 }
+
+
+
+
+
+
+use anchor_lang::prelude::*;
+use anchor_lang::solana_program::system_program;
+use anchor_lang::Accounts;
+
+// mod probability;
+// use probability::ProbabilityCalculator;
+
+declare_id!("3z5DJ8k16cB8oAtbS45ye4PdtFQZBrFjNKhqks2AAxxr");
+
+#[program]
+#[allow(deprecated)]
+pub mod company_pool {
+    use super::*;
+
+    pub fn initialize_company_pool(
+        ctx: Context<InitializeCompanyPool>,
+        ticket_price: u64,
+        company_name: String,
+        company_image: String,
+        items: Vec<PoolItemInput>,
+    ) -> Result<()> {
+        let company_pool = &mut ctx.accounts.company_pool;
+        let clock = Clock::get()?;
+
+        require!(ticket_price > 0, ErrorCode::InvalidTicketPrice);
+        require!(!items.is_empty(), ErrorCode::NoItemsProvided);
+        require!(company_name.len() <= 50, ErrorCode::CompanyNameTooLong);
+
+        company_pool.authority = ctx.accounts.authority.key();
+        company_pool.company_name = company_name;
+        company_pool.company_image = company_image;
+        company_pool.ticket_price = ticket_price;
+        company_pool.total_tickets_sold = 0;
+        company_pool.total_funds = 0;
+        company_pool.active = true;
+        company_pool.created_at = clock.unix_timestamp;
+
+        let mut total_value = 0u64;
+        let mut pool_items = Vec::new();
+
+        // Add items and calculate total value
+        for item in items {
+            require!(item.price > 0, ErrorCode::InvalidItemPrice);
+            require!(item.name.len() <= 50, ErrorCode::ItemNameTooLong);
+
+            pool_items.push(PoolItem {
+                image: item.image,
+                price: item.price,
+                name: item.name,
+                description: item.description,
+                probability: 0, // Will be calculated
+                available: true,
+            });
+
+            total_value = total_value
+                .checked_add(item.price)
+                .ok_or(ErrorCode::MathOverflow)?;
+        }
+
+        company_pool.items = pool_items;
+        company_pool.total_value = total_value;
+
+        // TODO: Calculate probabilities later
+        // calculate_probabilities(company_pool)?;
+
+        emit!(PoolInitializedEvent {
+            company_name: company_pool.company_name.clone(),
+            ticket_price,
+            item_count: company_pool.items.len() as u32,
+            authority: ctx.accounts.authority.key(),
+        });
+
+        Ok(())
+    }
+
+    // pub fn buy_ticket(ctx: Context<BuyTicket>, company_name: String) -> Result<()> {
+    //     let company_pool = &mut ctx.accounts.company_pool;
+    //     let user_account = &mut ctx.accounts.user_account;
+    //     let clock = Clock::get()?;
+
+    //     require!(company_pool.active, ErrorCode::PoolNotActive);
+    //     require!(
+    //         company_pool.company_name == company_name,
+    //         ErrorCode::InvalidCompanyName
+    //     );
+
+    //     // Transfer SOL from user to pool
+    //     let transfer_instruction = anchor_lang::solana_program::system_instruction::transfer(
+    //         &ctx.accounts.user.key(),
+    //         &ctx.accounts.pool_vault.key(),
+    //         company_pool.ticket_price,
+    //     );
+
+    //     anchor_lang::solana_program::program::invoke(
+    //         &transfer_instruction,
+    //         &[
+    //             ctx.accounts.user.to_account_info(),
+    //             ctx.accounts.pool_vault.to_account_info(),
+    //         ],
+    //     )?;
+
+    //     // Update user account
+    //     user_account.user = ctx.accounts.user.key();
+    //     user_account.company_name = company_name.clone();
+    //     user_account.eligible = true;
+    //     user_account.ticket_count = user_account
+    //         .ticket_count
+    //         .checked_add(1)
+    //         .ok_or(ErrorCode::MathOverflow)?;
+    //     user_account.last_purchase = clock.unix_timestamp;
+
+    //     // Update pool stats
+    //     company_pool.total_tickets_sold = company_pool
+    //         .total_tickets_sold
+    //         .checked_add(1)
+    //         .ok_or(ErrorCode::MathOverflow)?;
+    //     company_pool.total_funds = company_pool
+    //         .total_funds
+    //         .checked_add(company_pool.ticket_price)
+    //         .ok_or(ErrorCode::MathOverflow)?;
+
+    //     emit!(TicketPurchasedEvent {
+    //         user: ctx.accounts.user.key(),
+    //         company_name,
+    //         ticket_price: company_pool.ticket_price,
+    //         total_tickets: user_account.ticket_count,
+    //     });
+
+    //     // Update pool status
+    //     update_pool_status_internal(company_pool)?;
+
+    //     Ok(())
+    // }
+
+    // pub fn record_spin_result(ctx: Context<RecordSpinResult>) -> Result<()> {
+    //     let company_pool = &mut ctx.accounts.company_pool;
+    //     let user_account = &mut ctx.accounts.user_account;
+    //     let user_rewards = &mut ctx.accounts.user_rewards;
+    //     let clock = Clock::get()?;
+
+    //     require!(company_pool.active, ErrorCode::PoolNotActive);
+    //     require!(user_account.eligible, ErrorCode::UserNotEligible);
+    //     require!(user_account.ticket_count > 0, ErrorCode::NoTicketsAvailable);
+
+    //     // Consume one ticket
+    //     user_account.ticket_count = user_account
+    //         .ticket_count
+    //         .checked_sub(1)
+    //         .ok_or(ErrorCode::MathUnderflow)?;
+
+    //     if user_account.ticket_count == 0 {
+    //         user_account.eligible = false;
+    //     }
+
+    //     // Create weighted list based on probabilities
+    //     let weighted_list = ProbabilityCalculator::create_weighted_list(&company_pool.items);
+
+    //     // Select random item using the weighted list
+    //     let item_index = ProbabilityCalculator::select_random_item(
+    //         &weighted_list,
+    //         clock.unix_timestamp,
+    //         ctx.accounts.user.key(),
+    //     )?;
+
+    //     let won_item = &company_pool.items[item_index];
+
+    //     // Add to user's claimable rewards
+    //     user_rewards.user = ctx.accounts.user.key();
+    //     user_rewards.company_name = company_pool.company_name.clone();
+    //     user_rewards.rewards.push(ClaimableReward {
+    //         item_name: won_item.name.clone(),
+    //         item_image: won_item.image.clone(),
+    //         item_value: won_item.price,
+    //         description: won_item.description.clone(),
+    //         timestamp: clock.unix_timestamp,
+    //         claimed: false,
+    //     });
+
+    //     emit!(SpinResultEvent {
+    //         user: ctx.accounts.user.key(),
+    //         company_name: company_pool.company_name.clone(),
+    //         item_won: won_item.name.clone(),
+    //         item_value: won_item.price,
+    //         spin_timestamp: clock.unix_timestamp,
+    //     });
+
+    //     Ok(())
+    // }
+
+    // pub fn claim_reward(
+    //     ctx: Context<ClaimReward>,
+    //     reward_indices: Vec<usize>,
+    // ) -> Result<()> {
+    //     let user_rewards = &mut ctx.accounts.user_rewards;
+    //     let clock = Clock::get()?;
+
+    //     require!(!reward_indices.is_empty(), ErrorCode::NoRewardsSpecified);
+
+    //     let mut total_value = 0u64;
+
+    //     // Validate and calculate total value
+    //     for &index in &reward_indices {
+    //         require!(
+    //             index < user_rewards.rewards.len(),
+    //             ErrorCode::InvalidRewardIndex
+    //         );
+    //         require!(
+    //             !user_rewards.rewards[index].claimed,
+    //             ErrorCode::RewardAlreadyClaimed
+    //         );
+
+    //         total_value = total_value
+    //             .checked_add(user_rewards.rewards[index].item_value)
+    //             .ok_or(ErrorCode::MathOverflow)?;
+    //     }
+
+    //     // Mark rewards as claimed
+    //     for &index in &reward_indices {
+    //         user_rewards.rewards[index].claimed = true;
+    //         user_rewards.rewards[index].timestamp = clock.unix_timestamp;
+
+    //         emit!(RewardClaimedEvent {
+    //             user: ctx.accounts.user.key(),
+    //             item_name: user_rewards.rewards[index].item_name.clone(),
+    //             item_value: user_rewards.rewards[index].item_value,
+    //             claim_timestamp: clock.unix_timestamp,
+    //         });
+    //     }
+
+    //     // Transfer SOL from pool vault to user
+    //     **ctx
+    //         .accounts
+    //         .pool_vault
+    //         .to_account_info()
+    //         .try_borrow_mut_lamports()? -= total_value;
+    //     **ctx
+    //         .accounts
+    //         .user
+    //         .to_account_info()
+    //         .try_borrow_mut_lamports()? += total_value;
+
+    //     Ok(())
+    // }
+
+    // pub fn update_pool_status(ctx: Context<UpdatePoolStatus>) -> Result<()> {
+    // let company_pool = &mut ctx.accounts.company_pool;
+
+    // require!(company_pool.active, ErrorCode::PoolNotActive);
+
+    // update_pool_status_internal(company_pool)?;
+
+    // emit!(PoolStatusUpdatedEvent {
+    //     company_name: company_pool.company_name.clone(),
+    //     total_funds: company_pool.total_funds,
+    //     total_tickets: company_pool.total_tickets_sold,
+    // });
+
+    // Ok(())
+    // }
+
+    // pub fn withdraw_funds(ctx: Context<WithdrawFunds>, amount: u64) -> Result<()> {
+    //     require!(amount > 0, ErrorCode::InvalidAmount);
+
+    //     let pool_vault_lamports = ctx.accounts.pool_vault.to_account_info().lamports();
+    //     require!(amount <= pool_vault_lamports, ErrorCode::InsufficientBalance);
+
+    //     // Transfer SOL from pool vault to admin
+    //     **ctx
+    //         .accounts
+    //         .pool_vault
+    //         .to_account_info()
+    //         .try_borrow_mut_lamports()? -= amount;
+    //     **ctx
+    //         .accounts
+    //         .authority
+    //         .to_account_info()
+    //         .try_borrow_mut_lamports()? += amount;
+
+    //     emit!(FundsWithdrawnEvent {
+    //         authority: ctx.accounts.authority.key(),
+    //         amount,
+    //         timestamp: Clock::get()?.unix_timestamp,
+    //     });
+
+    //     Ok(())
+    // }
+}
+
+// Helper functions
+// fn calculate_probabilities(company_pool: &mut CompanyPool) -> Result<()> {
+//     let item_values: Vec<u64> = company_pool.items.iter().map(|item| item.price).collect();
+
+//     let probabilities = ProbabilityCalculator::calculate_probabilities(
+//         &item_values,
+//         company_pool.ticket_price,
+//         company_pool.total_funds,
+//     )?;
+
+//     // Update probabilities in pool items
+//     for (i, probability) in probabilities.iter().enumerate() {
+//         if i < company_pool.items.len() {
+//             company_pool.items[i].probability = *probability;
+//         }
+//     }
+
+//     Ok(())
+// }
+
+fn update_pool_status_internal(company_pool: &mut CompanyPool) -> Result<()> {
+    // calculate_probabilities(company_pool)?;
+    Ok(())
+}
+
+// Account structures
+#[derive(Accounts)]
+#[instruction(company_name: String)]
+pub struct InitializeCompanyPool<'info> {
+    #[account(
+        init,
+        payer = authority,
+        space = CompanyPool::space(&company_name, &Vec::<PoolItemInput>::new()), // Dynamic space calculation
+        seeds = [b"company_pool", company_name.as_bytes()],
+        bump
+    )]
+    pub company_pool: Account<'info, CompanyPool>,
+
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + 32, // Basic vault account
+        seeds = [b"pool_vault", company_name.as_bytes()],
+        bump
+    )]
+    /// CHECK: This is a SOL-only PDA vault. No data is read or written to it.
+    /// It's only used to hold lamports and transfer them securely.
+    pub pool_vault: AccountInfo<'info>,
+
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+// #[derive(Accounts)]
+// #[instruction(company_name: String)]
+// pub struct BuyTicket<'info> {
+//     #[account(
+//         mut,
+//         seeds = [b"company_pool", company_name.as_bytes()],
+//         bump
+//     )]
+//     pub company_pool: Account<'info, CompanyPool>,
+
+//     #[account(
+//         init_if_needed,
+//         payer = user,
+//         space = 8 + UserAccount::INIT_SPACE,
+//         seeds = [b"user_account", user.key().as_ref(), company_name.as_bytes()],
+//         bump
+//     )]
+//     pub user_account: Account<'info, UserAccount>,
+
+//     #[account(
+//         mut,
+//         seeds = [b"pool_vault", company_name.as_bytes()],
+//         bump
+//     )]
+//     pub pool_vault: SystemAccount<'info>,
+
+//     #[account(mut)]
+//     pub user: Signer<'info>,
+//     pub system_program: Program<'info, System>,
+// }
+
+// #[derive(Accounts)]
+// pub struct RecordSpinResult<'info> {
+//     #[account(
+//         mut,
+//         seeds = [b"company_pool", company_pool.company_name.as_bytes()],
+//         bump
+//     )]
+//     pub company_pool: Account<'info, CompanyPool>,
+
+//     #[account(
+//         mut,
+//         seeds = [b"user_account", user.key().as_ref(), company_pool.company_name.as_bytes()],
+//         bump
+//     )]
+//     pub user_account: Account<'info, UserAccount>,
+
+//     #[account(
+//         init_if_needed,
+//         payer = user,
+//         space = 8 + UserRewards::INIT_SPACE,
+//         seeds = [b"user_rewards", user.key().as_ref(), company_pool.company_name.as_bytes()],
+//         bump
+//     )]
+//     pub user_rewards: Account<'info, UserRewards>,
+
+//     #[account(mut)]
+//     pub user: Signer<'info>,
+//     pub system_program: Program<'info, System>,
+// }
+
+// #[derive(Accounts)]
+// pub struct ClaimReward<'info> {
+//     #[account(
+//         mut,
+//         seeds = [b"user_rewards", user.key().as_ref(), user_rewards.company_name.as_bytes()],
+//         bump
+//     )]
+//     pub user_rewards: Account<'info, UserRewards>,
+
+//     #[account(
+//         mut,
+//         seeds = [b"pool_vault", user_rewards.company_name.as_bytes()],
+//         bump
+//     )]
+//     pub pool_vault: SystemAccount<'info>,
+
+//     #[account(mut)]
+//     pub user: Signer<'info>,
+// }
+
+// #[derive(Accounts)]
+// pub struct UpdatePoolStatus<'info> {
+//     #[account(
+//         mut,
+//         seeds = [b"company_pool", company_pool.company_name.as_bytes()],
+//         bump
+//     )]
+//     pub company_pool: Account<'info, CompanyPool>,
+// }
+
+// #[derive(Accounts)]
+// pub struct WithdrawFunds<'info> {
+//     #[account(
+//         seeds = [b"company_pool", company_pool.company_name.as_bytes()],
+//         bump,
+//         has_one = authority
+//     )]
+//     pub company_pool: Account<'info, CompanyPool>,
+
+//     #[account(
+//         mut,
+//         seeds = [b"pool_vault", company_pool.company_name.as_bytes()],
+//         bump
+//     )]
+//     pub pool_vault: SystemAccount<'info>,
+
+//     #[account(mut)]
+//     pub authority: Signer<'info>,
+// }
+
+// Data structures
+#[account]
+pub struct CompanyPool {
+    pub authority: Pubkey,          // 32 bytes
+    pub company_name: String,       // 4 + 50 bytes
+    pub company_image: String,      // 4 + 200 bytes
+    pub ticket_price: u64,          // 8 bytes
+    pub items: Vec<PoolItem>,       // 4 + (items * PoolItem size)
+    pub total_value: u64,           // 8 bytes
+    pub total_tickets_sold: u64,    // 8 bytes
+    pub total_funds: u64,           // 8 bytes
+    pub active: bool,               // 1 byte
+    pub created_at: i64,            // 8 bytes
+}
+
+impl CompanyPool {
+    pub fn space(company_name: &str, items: &Vec<PoolItemInput>) -> usize {
+        8 + // discriminator
+        32 + // authority
+        4 + company_name.len().min(50) + // company_name
+        4 + 200 + // company_image (max length)
+        8 + // ticket_price
+        4 + (items.len() * PoolItem::size()) + // items vector
+        8 + // total_value
+        8 + // total_tickets_sold
+        8 + // total_funds
+        1 + // active
+        8   // created_at
+    }
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct PoolItem {
+    pub image: String,          // 4 + 200 bytes
+    pub price: u64,             // 8 bytes
+    pub name: String,           // 4 + 50 bytes
+    pub description: String,    // 4 + 200 bytes
+    pub probability: u32,       // 4 bytes
+    pub available: bool,        // 1 byte
+}
+impl PoolItem {
+    pub fn size() -> usize {
+        4 + 200 + // image
+        8 +       // price
+        4 + 50 +  // name
+        4 + 200 + // description
+        4 +       // probability
+        1         // available
+    }
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct PoolItemInput {
+    pub image: String,
+    pub price: u64,
+    pub name: String,
+    pub description: String,
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct UserAccount {
+    pub user: Pubkey,
+    #[max_len(50)]
+    pub company_name: String,
+    pub eligible: bool,
+    pub ticket_count: u32,
+    pub last_purchase: i64,
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct UserRewards {
+    pub user: Pubkey,
+    #[max_len(50)]
+    pub company_name: String,
+    #[max_len(100)]
+    pub rewards: Vec<ClaimableReward>,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, InitSpace)]
+pub struct ClaimableReward {
+    #[max_len(50)]
+    pub item_name: String,
+    #[max_len(200)]
+    pub item_image: String,
+    pub item_value: u64,
+    #[max_len(200)]
+    pub description: String,
+    pub timestamp: i64,
+    pub claimed: bool,
+}
+
+// Events
+#[event]
+pub struct PoolInitializedEvent {
+    pub company_name: String,
+    pub ticket_price: u64,
+    pub item_count: u32,
+    pub authority: Pubkey,
+}
+
+#[event]
+pub struct TicketPurchasedEvent {
+    pub user: Pubkey,
+    pub company_name: String,
+    pub ticket_price: u64,
+    pub total_tickets: u32,
+}
+
+#[event]
+pub struct SpinResultEvent {
+    pub user: Pubkey,
+    pub company_name: String,
+    pub item_won: String,
+    pub item_value: u64,
+    pub spin_timestamp: i64,
+}
+
+#[event]
+pub struct RewardClaimedEvent {
+    pub user: Pubkey,
+    pub item_name: String,
+    pub item_value: u64,
+    pub claim_timestamp: i64,
+}
+
+#[event]
+pub struct PoolStatusUpdatedEvent {
+    pub company_name: String,
+    pub total_funds: u64,
+    pub total_tickets: u64,
+}
+
+#[event]
+pub struct FundsWithdrawnEvent {
+    pub authority: Pubkey,
+    pub amount: u64,
+    pub timestamp: i64,
+}
+
+// Error codes
+#[error_code]
+pub enum ErrorCode {
+    #[msg("Invalid ticket price")]
+    InvalidTicketPrice,
+    #[msg("No items provided")]
+    NoItemsProvided,
+    #[msg("Company name too long")]
+    CompanyNameTooLong,
+    #[msg("Invalid item price")]
+    InvalidItemPrice,
+    #[msg("Item name too long")]
+    ItemNameTooLong,
+    #[msg("Math overflow")]
+    MathOverflow,
+    #[msg("Math underflow")]
+    MathUnderflow,
+    #[msg("Pool not active")]
+    PoolNotActive,
+    #[msg("Invalid company name")]
+    InvalidCompanyName,
+    #[msg("User not eligible")]
+    UserNotEligible,
+    #[msg("No tickets available")]
+    NoTicketsAvailable,
+    #[msg("No rewards specified")]
+    NoRewardsSpecified,
+    #[msg("Invalid reward index")]
+    InvalidRewardIndex,
+    #[msg("Reward already claimed")]
+    RewardAlreadyClaimed,
+    #[msg("Invalid amount")]
+    InvalidAmount,
+    #[msg("Insufficient balance")]
+    InsufficientBalance,
+    #[msg("No items available")]
+    NoItemsAvailable,
+}
