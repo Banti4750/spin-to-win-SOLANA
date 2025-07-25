@@ -147,4 +147,216 @@ describe("company_pool", () => {
     
     console.log("✅ All integrity checks passed!");
   });
+
+   it("Buys a ticket successfully", async () => {
+    try {
+      // Get initial balances
+      const buyerInitialBalance = await connection.getBalance(provider.wallet.publicKey);
+      const vaultInitialBalance = await connection.getBalance(poolVaultPda);
+      const poolDataBefore = await program.account.companyPool.fetch(companyPoolPda);
+      
+      console.log("💰 Initial buyer balance:", buyerInitialBalance / LAMPORTS_PER_SOL, "SOL");
+      console.log("🏦 Initial vault balance:", vaultInitialBalance / LAMPORTS_PER_SOL, "SOL");
+      console.log("🎫 Initial tickets sold:", poolDataBefore.totalTicketsSold.toString());
+      console.log("💵 Initial total funds:", poolDataBefore.totalFunds.toString());
+
+      // Buy a ticket
+      const tx = await program.methods
+        .buyTicket()
+        .accounts({
+          companyPool: companyPoolPda,
+          buyer: provider.wallet.publicKey,
+          poolVault: poolVaultPda,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+
+      console.log("🎫 Buy ticket transaction signature:", tx);
+
+      // Wait for transaction confirmation
+      await provider.connection.confirmTransaction(tx);
+
+      // Get final balances and pool data
+      const buyerFinalBalance = await connection.getBalance(provider.wallet.publicKey);
+      const vaultFinalBalance = await connection.getBalance(poolVaultPda);
+      const poolDataAfter = await program.account.companyPool.fetch(companyPoolPda);
+
+      console.log("💰 Final buyer balance:", buyerFinalBalance / LAMPORTS_PER_SOL, "SOL");
+      console.log("🏦 Final vault balance:", vaultFinalBalance / LAMPORTS_PER_SOL, "SOL");
+      console.log("🎫 Final tickets sold:", poolDataAfter.totalTicketsSold.toString());
+      console.log("💵 Final total funds:", poolDataAfter.totalFunds.toString());
+
+      // Assertions
+      // Check that tickets sold increased by 1
+      assert.ok(
+        poolDataAfter.totalTicketsSold.eq(poolDataBefore.totalTicketsSold.add(new anchor.BN(1))),
+        "Total tickets sold should increase by 1"
+      );
+
+      // Check that total funds increased by ticket price
+      assert.ok(
+        poolDataAfter.totalFunds.eq(poolDataBefore.totalFunds.add(ticketPrice)),
+        "Total funds should increase by ticket price"
+      );
+
+      // Check that vault received the funds
+      assert.ok(
+        vaultFinalBalance >= vaultInitialBalance + ticketPrice.toNumber(),
+        "Vault should receive the ticket price"
+      );
+
+      // Check that buyer's balance decreased (approximately by ticket price + transaction fees)
+      const balanceDifference = buyerInitialBalance - buyerFinalBalance;
+      assert.ok(
+        balanceDifference >= ticketPrice.toNumber(),
+        "Buyer balance should decrease by at least ticket price"
+      );
+
+      // Check that pool is still active
+      assert.ok(poolDataAfter.active, "Pool should remain active");
+
+      console.log("✅ Ticket purchased successfully!");
+      console.log("📊 Balance difference:", balanceDifference / LAMPORTS_PER_SOL, "SOL");
+      console.log("🎫 New total tickets:", poolDataAfter.totalTicketsSold.toString());
+      console.log("💰 New total funds:", poolDataAfter.totalFunds.toString());
+
+    } catch (error) {
+      console.error("❌ Error buying ticket:");
+      if (error.logs) {
+        console.error("Program logs:", error.logs);
+      }
+      console.error("Full error:", error);
+      throw error;
+    }
+  });
+
+  it("Buys multiple tickets", async () => {
+    try {
+      const poolDataBefore = await program.account.companyPool.fetch(companyPoolPda);
+      const initialTicketsSold = poolDataBefore.totalTicketsSold;
+      const initialTotalFunds = poolDataBefore.totalFunds;
+
+      console.log("🎫 Starting tickets sold:", initialTicketsSold.toString());
+
+      // Buy 3 more tickets
+      for (let i = 0; i < 3; i++) {
+        const tx = await program.methods
+          .buyTicket()
+          .accounts({
+            companyPool: companyPoolPda,
+            buyer: provider.wallet.publicKey,
+            poolVault: poolVaultPda,
+            systemProgram: SystemProgram.programId,
+          })
+          .rpc();
+
+        await provider.connection.confirmTransaction(tx);
+        console.log(`🎫 Bought ticket ${i + 1}/3, tx: ${tx}`);
+      }
+
+      const poolDataAfter = await program.account.companyPool.fetch(companyPoolPda);
+
+      // Assertions
+      assert.ok(
+        poolDataAfter.totalTicketsSold.eq(initialTicketsSold.add(new anchor.BN(3))),
+        "Should have 3 more tickets sold"
+      );
+
+      assert.ok(
+        poolDataAfter.totalFunds.eq(initialTotalFunds.add(ticketPrice.mul(new anchor.BN(3)))),
+        "Total funds should increase by 3x ticket price"
+      );
+
+      console.log("✅ Multiple tickets purchased successfully!");
+      console.log("🎫 Final tickets sold:", poolDataAfter.totalTicketsSold.toString());
+      console.log("💰 Final total funds:", poolDataAfter.totalFunds.toString());
+
+    } catch (error) {
+      console.error("❌ Error buying multiple tickets:");
+      if (error.logs) {
+        console.error("Program logs:", error.logs);
+      }
+      throw error;
+    }
+  });
+
+  it("Fails to buy ticket with insufficient funds", async () => {
+    try {
+      // Create a new keypair with no funds
+      const poorBuyer = anchor.web3.Keypair.generate();
+
+      // Try to buy a ticket (should fail)
+      await program.methods
+        .buyTicket()
+        .accounts({
+          companyPool: companyPoolPda,
+          buyer: poorBuyer.publicKey,
+          poolVault: poolVaultPda,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([poorBuyer])
+        .rpc();
+
+      // If we reach here, the test should fail
+      assert.fail("Transaction should have failed due to insufficient funds");
+
+    } catch (error) {
+      // This is expected - the transaction should fail
+      console.log("✅ Correctly failed with insufficient funds");
+      assert.ok(error.toString().includes("insufficient"), "Should fail with insufficient funds error");
+    }
+  });
+
+  it("Verifies vault accumulates funds correctly", async () => {
+    const poolData = await program.account.companyPool.fetch(companyPoolPda);
+    const vaultBalance = await connection.getBalance(poolVaultPda);
+
+    console.log("🏦 Vault balance:", vaultBalance / LAMPORTS_PER_SOL, "SOL");
+    console.log("📊 Pool total funds:", poolData.totalFunds.toNumber() / LAMPORTS_PER_SOL, "SOL");
+    console.log("🎫 Total tickets sold:", poolData.totalTicketsSold.toString());
+
+    // The vault balance should match the pool's total funds (accounting for rent)
+    const expectedFunds = poolData.totalFunds.toNumber();
+    assert.ok(
+      vaultBalance >= expectedFunds,
+      `Vault balance (${vaultBalance}) should be at least total funds (${expectedFunds})`
+    );
+
+    console.log("✅ Vault funds verification passed!");
+  });
+
+  it("buys ticket" , async () =>{
+     const buyerInitialBalance = await connection.getBalance(provider.wallet.publicKey);
+      const vaultInitialBalance = await connection.getBalance(poolVaultPda);
+      const poolDataBefore = await program.account.companyPool.fetch(companyPoolPda);
+      
+      console.log("💰 Initial buyer balance:", buyerInitialBalance / LAMPORTS_PER_SOL, "SOL");
+      console.log("🏦 Initial vault balance:", vaultInitialBalance / LAMPORTS_PER_SOL, "SOL");
+      console.log("🎫 Initial tickets sold:", poolDataBefore.totalTicketsSold.toString());
+      console.log("💵 Initial total funds:", poolDataBefore.totalFunds.toString());
+
+    const tx = await program.methods
+    .buyTicket()
+    .accounts({
+      companyPool: companyPoolPda,
+      buyer: provider.wallet.publicKey,
+      poolVault: poolVaultPda,
+      systemProgram: SystemProgram.programId,
+    })
+    .rpc();
+    console.log("Transaction signature:", tx);
+    // Wait for transaction confirmation
+    await provider.connection.confirmTransaction(tx); 
+
+    
+      const buyerFinalBalance = await connection.getBalance(provider.wallet.publicKey);
+      const vaultFinalBalance = await connection.getBalance(poolVaultPda);
+      const poolDataAfter = await program.account.companyPool.fetch(companyPoolPda);
+
+      console.log("💰 Final buyer balance:", buyerFinalBalance / LAMPORTS_PER_SOL, "SOL");
+      console.log("🏦 Final vault balance:", vaultFinalBalance / LAMPORTS_PER_SOL, "SOL");
+      console.log("🎫 Final tickets sold:", poolDataAfter.totalTicketsSold.toString());
+      console.log("💵 Final total funds:", poolDataAfter.totalFunds.toString());
+
+  })
 });

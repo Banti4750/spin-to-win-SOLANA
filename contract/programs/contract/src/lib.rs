@@ -12,7 +12,7 @@ pub mod company_pool {
         company_name: String,
         company_image: String,
         items: Vec<PoolItemInput>,
-    ) -> Result<()> {
+      ) -> Result<()> {
         let company_pool = &mut ctx.accounts.company_pool;
         let clock = Clock::get()?;
 
@@ -71,6 +71,70 @@ pub mod company_pool {
 
         Ok(())
     }
+
+    pub fn buy_ticket(ctx: Context<BuyTicket>) -> Result<()> {
+        let company_pool = &mut ctx.accounts.company_pool;
+        let clock = Clock::get()?;
+        
+        // Validate pool state
+        require!(company_pool.active, ErrorCode::PoolInactive);
+        require!(!company_pool.items.is_empty(), ErrorCode::NoItemsProvided);
+        
+        let ticket_price = company_pool.ticket_price;
+        
+        // Transfer SOL from buyer to pool vault
+        let transfer_ix = anchor_lang::system_program::Transfer {
+            from: ctx.accounts.buyer.to_account_info(),
+            to: ctx.accounts.pool_vault.to_account_info(),
+        };
+        
+        let cpi_ctx = CpiContext::new(
+            ctx.accounts.system_program.to_account_info(),
+            transfer_ix,
+        );
+        
+        anchor_lang::system_program::transfer(cpi_ctx, ticket_price)?;
+        
+        // Update the company pool state
+        company_pool.total_tickets_sold = company_pool
+            .total_tickets_sold
+            .checked_add(1)
+            .ok_or(ErrorCode::MathOverflow)?;
+            
+        company_pool.total_funds = company_pool
+            .total_funds
+            .checked_add(ticket_price)
+            .ok_or(ErrorCode::MathOverflow)?;
+
+        // Emit event
+        emit!(TicketPurchasedEvent {
+            buyer: ctx.accounts.buyer.key(),
+            ticket_price,
+            total_tickets_sold: company_pool.total_tickets_sold,
+            timestamp: clock.unix_timestamp,
+        });
+
+        Ok(())
+    }
+}
+
+#[derive(Accounts)]
+pub struct BuyTicket<'info> {
+    #[account(mut)]
+    pub company_pool: Account<'info, CompanyPool>,
+    
+    #[account(mut)]
+    pub buyer: Signer<'info>,
+    
+    /// CHECK: This is the pool vault PDA that holds the funds
+    #[account(
+        mut,
+        seeds = [b"pool_vault", company_pool.company_name.as_bytes()],
+        bump,
+    )]
+    pub pool_vault: AccountInfo<'info>,
+    
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
@@ -150,6 +214,14 @@ pub struct PoolInitializedEvent {
     pub authority: Pubkey,
 }
 
+#[event]
+pub struct TicketPurchasedEvent {
+    pub buyer: Pubkey,
+    pub ticket_price: u64,
+    pub total_tickets_sold: u64,
+    pub timestamp: i64,
+}
+
 #[error_code]
 pub enum ErrorCode {
     #[msg("Ticket price must be greater than 0")]
@@ -172,4 +244,6 @@ pub enum ErrorCode {
     TooManyItems,
     #[msg("Math overflow occurred")]
     MathOverflow,
+    #[msg("Pool is not active")]
+    PoolInactive,
 }
