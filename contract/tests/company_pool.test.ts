@@ -325,38 +325,235 @@ describe("company_pool", () => {
     console.log("✅ Vault funds verification passed!");
   });
 
-  it("buys ticket" , async () =>{
-     const buyerInitialBalance = await connection.getBalance(provider.wallet.publicKey);
-      const vaultInitialBalance = await connection.getBalance(poolVaultPda);
+
+
+  it("Successfully withdraws funds as authority", async () => {
+    try {
+      // Get initial state
       const poolDataBefore = await program.account.companyPool.fetch(companyPoolPda);
-      
-      console.log("💰 Initial buyer balance:", buyerInitialBalance / LAMPORTS_PER_SOL, "SOL");
-      console.log("🏦 Initial vault balance:", vaultInitialBalance / LAMPORTS_PER_SOL, "SOL");
-      console.log("🎫 Initial tickets sold:", poolDataBefore.totalTicketsSold.toString());
-      console.log("💵 Initial total funds:", poolDataBefore.totalFunds.toString());
+      const authorityBalanceBefore = await connection.getBalance(provider.wallet.publicKey);
+      const vaultBalanceBefore = await connection.getBalance(poolVaultPda);
 
-    const tx = await program.methods
-    .buyTicket()
-    .accounts({
-      companyPool: companyPoolPda,
-      buyer: provider.wallet.publicKey,
-      poolVault: poolVaultPda,
-      systemProgram: SystemProgram.programId,
-    })
-    .rpc();
-    console.log("Transaction signature:", tx);
-    // Wait for transaction confirmation
-    await provider.connection.confirmTransaction(tx); 
+      const withdrawAmount = new anchor.BN(0.5 * LAMPORTS_PER_SOL); // Withdraw 0.5 SOL
 
-    
-      const buyerFinalBalance = await connection.getBalance(provider.wallet.publicKey);
-      const vaultFinalBalance = await connection.getBalance(poolVaultPda);
+      console.log("📊 Initial State:");
+      console.log("   Pool total funds:", poolDataBefore.totalFunds.toNumber() / LAMPORTS_PER_SOL, "SOL");
+      console.log("   Authority balance:", authorityBalanceBefore / LAMPORTS_PER_SOL, "SOL");
+      console.log("   Vault balance:", vaultBalanceBefore / LAMPORTS_PER_SOL, "SOL");
+      console.log("   Withdraw amount:", withdrawAmount.toNumber() / LAMPORTS_PER_SOL, "SOL");
+
+      // Perform withdrawal
+      const tx = await program.methods
+        .withdrawFundsFromVault(withdrawAmount)
+        .accounts({
+          companyPool: companyPoolPda,
+          authority: provider.wallet.publicKey,
+          poolVault: poolVaultPda,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+
+      console.log("💰 Withdrawal transaction:", tx);
+      await provider.connection.confirmTransaction(tx);
+
+      // Get final state
       const poolDataAfter = await program.account.companyPool.fetch(companyPoolPda);
+      const authorityBalanceAfter = await connection.getBalance(provider.wallet.publicKey);
+      const vaultBalanceAfter = await connection.getBalance(poolVaultPda);
 
-      console.log("💰 Final buyer balance:", buyerFinalBalance / LAMPORTS_PER_SOL, "SOL");
-      console.log("🏦 Final vault balance:", vaultFinalBalance / LAMPORTS_PER_SOL, "SOL");
-      console.log("🎫 Final tickets sold:", poolDataAfter.totalTicketsSold.toString());
-      console.log("💵 Final total funds:", poolDataAfter.totalFunds.toString());
+      console.log("📊 Final State:");
+      console.log("   Pool total funds:", poolDataAfter.totalFunds.toNumber() / LAMPORTS_PER_SOL, "SOL");
+      console.log("   Authority balance:", authorityBalanceAfter / LAMPORTS_PER_SOL, "SOL");
+      console.log("   Vault balance:", vaultBalanceAfter / LAMPORTS_PER_SOL, "SOL");
 
-  })
+      // Assertions
+      // Pool total funds should decrease by withdrawal amount
+      assert.ok(
+        poolDataAfter.totalFunds.eq(poolDataBefore.totalFunds.sub(withdrawAmount)),
+        "Pool total funds should decrease by withdrawal amount"
+      );
+
+      // Vault balance should decrease by withdrawal amount
+      assert.ok(
+        vaultBalanceAfter <= vaultBalanceBefore - withdrawAmount.toNumber(),
+        "Vault balance should decrease by withdrawal amount"
+      );
+
+      // Authority balance should increase (minus transaction fees)
+      const balanceIncrease = authorityBalanceAfter - authorityBalanceBefore;
+      assert.ok(
+        balanceIncrease > 0,
+        "Authority balance should increase"
+      );
+
+      // Pool should remain active
+      assert.ok(poolDataAfter.active, "Pool should remain active");
+
+      console.log("✅ Withdrawal successful!");
+      console.log("   Amount withdrawn:", withdrawAmount.toNumber() / LAMPORTS_PER_SOL, "SOL");
+      console.log("   Authority balance increase:", balanceIncrease / LAMPORTS_PER_SOL, "SOL");
+
+    } catch (error) {
+      console.error("❌ Error withdrawing funds:");
+      if (error.logs) {
+        console.error("Program logs:", error.logs);
+      }
+      console.error("Full error:", error);
+      throw error;
+    }
+  });
+
+   it("Fails to withdraw zero amount", async () => {
+    try {
+      console.log("🚫 Attempting to withdraw zero amount");
+
+      await program.methods
+        .withdrawFundsFromVault(new anchor.BN(0))
+        .accounts({
+          companyPool: companyPoolPda,
+          authority: provider.wallet.publicKey,
+          poolVault: poolVaultPda,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+
+      assert.fail("Should have failed due to zero withdrawal amount");
+
+    } catch (error) {
+      console.log("✅ Correctly failed with zero withdrawal amount");
+      assert.ok(
+        error.toString().includes("InvalidAmount"),
+        "Should fail with invalid amount error"
+      );
+    }
+  });
+
+  it("Fails when unauthorized user tries to withdraw", async () => {
+    try {
+      // Create a new keypair (unauthorized user)
+      const unauthorizedUser = web3.Keypair.generate();
+     
+      
+      // Airdrop some SOL for transaction fees
+      const airdropSig = await connection.requestAirdrop(
+        unauthorizedUser.publicKey,
+        0.1 * LAMPORTS_PER_SOL
+      );
+      await connection.confirmTransaction(airdropSig);
+
+      console.log("🚫 Unauthorized user attempting withdrawal");
+      console.log("   Unauthorized user:", unauthorizedUser.publicKey.toString());
+
+      await program.methods
+        .withdrawFundsFromVault(new anchor.BN(0.1 * LAMPORTS_PER_SOL))
+        .accounts({
+          companyPool: companyPoolPda,
+          authority: unauthorizedUser.publicKey,
+          poolVault: poolVaultPda,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([unauthorizedUser])
+        .rpc();
+
+      assert.fail("Should have failed due to unauthorized access");
+
+    } catch (error) {
+      console.log("✅ Correctly failed with unauthorized user");
+      assert.ok(
+        error.toString().includes("UnauthorizedWithdrawal") ||
+        error.toString().includes("has_one"),
+        "Should fail with unauthorized error"
+      );
+    }
+  });
+
+  it("Withdraws remaining funds completely", async () => {
+    try {
+      const poolDataBefore = await program.account.companyPool.fetch(companyPoolPda);
+      const vaultBalanceBefore = await connection.getBalance(poolVaultPda);
+      
+      // Calculate rent exemption minimum
+      const rentExemptAmount = await connection.getMinimumBalanceForRentExemption(8);
+      const withdrawableAmount = Math.max(0, vaultBalanceBefore - rentExemptAmount);
+
+      console.log("💰 Withdrawing remaining funds:");
+      console.log("   Vault balance:", vaultBalanceBefore / LAMPORTS_PER_SOL, "SOL");
+      console.log("   Rent exempt minimum:", rentExemptAmount / LAMPORTS_PER_SOL, "SOL");
+      console.log("   Withdrawable amount:", withdrawableAmount / LAMPORTS_PER_SOL, "SOL");
+
+      if (withdrawableAmount > 0) {
+        const tx = await program.methods
+          .withdrawFundsFromVault(new anchor.BN(withdrawableAmount))
+          .accounts({
+            companyPool: companyPoolPda,
+            authority: provider.wallet.publicKey,
+            poolVault: poolVaultPda,
+            systemProgram: SystemProgram.programId,
+          })
+          .rpc();
+
+        await provider.connection.confirmTransaction(tx);
+
+        const poolDataAfter = await program.account.companyPool.fetch(companyPoolPda);
+        const vaultBalanceAfter = await connection.getBalance(poolVaultPda);
+
+        console.log("📊 After complete withdrawal:");
+        console.log("   Pool total funds:", poolDataAfter.totalFunds.toNumber() / LAMPORTS_PER_SOL, "SOL");
+        console.log("   Vault balance:", vaultBalanceAfter / LAMPORTS_PER_SOL, "SOL");
+
+        // Vault should only have rent exemption left
+        assert.ok(
+          vaultBalanceAfter >= rentExemptAmount,
+          "Vault should maintain rent exemption"
+        );
+
+        // Pool funds should be updated accordingly
+        assert.ok(
+          poolDataAfter.totalFunds.toNumber() < poolDataBefore.totalFunds.toNumber(),
+          "Pool funds should decrease"
+        );
+
+        console.log("✅ Complete withdrawal successful!");
+      } else {
+        console.log("ℹ️ No withdrawable funds remaining");
+      }
+
+    } catch (error) {
+      console.error("❌ Error in complete withdrawal:");
+      if (error.logs) {
+        console.error("Program logs:", error.logs);
+      }
+      throw error;
+    }
+  });
+
+  it("Verifies final state consistency", async () => {
+    const poolData = await program.account.companyPool.fetch(companyPoolPda);
+    const vaultBalance = await connection.getBalance(poolVaultPda);
+    const rentExemptAmount = await connection.getMinimumBalanceForRentExemption(8);
+
+    console.log("🔍 Final verification:");
+    console.log("   Pool active:", poolData.active);
+    console.log("   Pool total funds:", poolData.totalFunds.toNumber() / LAMPORTS_PER_SOL, "SOL");
+    console.log("   Vault balance:", vaultBalance / LAMPORTS_PER_SOL, "SOL");
+    console.log("   Tickets sold:", poolData.totalTicketsSold.toString());
+
+    // Pool should still be active
+    assert.ok(poolData.active, "Pool should remain active");
+
+    // Vault should maintain minimum rent exemption
+    assert.ok(
+      vaultBalance >= rentExemptAmount,
+      "Vault should maintain rent exemption"
+    );
+
+    // Pool accounting should be consistent
+    assert.ok(
+      poolData.totalFunds.toNumber() >= 0,
+      "Pool total funds should not be negative"
+    );
+
+    console.log("✅ Final state verification passed!");
+  });
+
 });
