@@ -1,149 +1,328 @@
-// // probability.rs
-// use anchor_lang::prelude::*;
-// use anchor_lang::solana_program::hash::hash;
-// use crate::{PoolItem, ErrorCode};
+use anchor_lang::prelude::*;
 
-// const BASIS_POINTS: u32 = 10_000; // 100% = 10,000 basis points
-// const MAX_HOUSE_EDGE: u32 = 2_000; // Max 20% house edge
-// const MIN_HOUSE_EDGE: u32 = 500;   // Min 5% house edge
-// const MIN_PROBABILITY: u32 = 10;    // Min 0.1% chance (dynamically adjusted)
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
+pub struct WeightedItem {
+    pub name: String,
+    pub value: u64,
+    pub weight: f64,
+    pub probability: u32, // Stored as basis points (1 = 0.01%)
+}
 
-// pub struct ProbabilityCalculator;
+pub struct WeightedProbabilityCalculator {
+    pub items: Vec<WeightedItem>,
+    pub ticket_price: u64,
+    pub total_weight: f64,
+}
 
-// impl ProbabilityCalculator {
-//     pub fn calculate_probabilities(
-//         item_values: &[u64],
-//         ticket_price: u64,
-//     ) -> Result<(Vec<u32>, u32)> {
-//         require!(!item_values.is_empty(), ErrorCode::NoItemsProvided);
-//         require!(ticket_price > 0, ErrorCode::InvalidTicketPrice);
+impl WeightedProbabilityCalculator {
+    pub fn new(items: Vec<(String, u64)>, ticket_price: u64) -> Self {
+        let mut calculator = Self {
+            items: items
+                .into_iter()
+                .map(|(name, value)| WeightedItem {
+                    name,
+                    value,
+                    weight: 0.0,
+                    probability: 0,
+                })
+                .collect(),
+            ticket_price,
+            total_weight: 0.0,
+        };
 
-//         let total_item_value: u64 = item_values.iter().sum();
-//         let mut house_edge = Self::calculate_optimal_house_edge(total_item_value, ticket_price)?;
-        
-//         let mut probabilities = Vec::with_capacity(item_values.len());
-//         let mut total_probability = 0u32;
+        calculator.calculate_weights_advanced();
+        calculator
+    }
 
-//         // Calculate probabilities with dynamic minimums
-//         for &value in item_values {
-//             let prob = Self::calculate_item_probability(value, ticket_price, house_edge)?;
-//             probabilities.push(prob);
-//             total_probability = total_probability.checked_add(prob).ok_or(ErrorCode::MathOverflow)?;
-//         }
+    // Simple inverse value weighting (higher value = lower probability)
+    pub fn calculate_weights_simple(&mut self) {
+        self.total_weight = 0.0;
 
-//         // Normalize and adjust house edge if needed
-//         let (normalized_probs, adjusted_edge) = 
-//             Self::normalize_and_adjust(probabilities, total_probability, house_edge, item_values, ticket_price)?;
+        // Use inverse of value as weight with safety checks
+        for item in &mut self.items {
+            item.weight = 1.0 / (item.value as f64).max(f64::MIN_POSITIVE);
+            self.total_weight += item.weight;
+        }
 
-//         Ok((normalized_probs, adjusted_edge))
-//     }
+        self.normalize_probabilities();
+    }
 
-//     fn calculate_optimal_house_edge(total_item_value: u64, ticket_price: u64) -> Result<u32> {
-//         // Base edge is 15% but adjusts between 5-20% based on risk
-//         let base_edge = 1_500; // 15%
-        
-//         // If total item value is high relative to ticket price, increase edge for safety
-//         let value_ratio = total_item_value.checked_div(ticket_price).unwrap_or(1);
-//         let edge_adjustment = (value_ratio as u32).saturating_sub(10) * 50; // 0.5% per 10x ratio
-        
-//         let calculated_edge = base_edge.saturating_add(edge_adjustment)
-//             .clamp(MIN_HOUSE_EDGE, MAX_HOUSE_EDGE);
-        
-//         Ok(calculated_edge)
-//     }
+    // Advanced weighting based on ticket price ratio
+    pub fn calculate_weights_advanced(&mut self) {
+        self.total_weight = 0.0;
 
-//     fn calculate_item_probability(
-//         item_value: u64,
-//         ticket_price: u64,
-//         house_edge: u32,
-//     ) -> Result<u32> {
-//         let payout_per_ticket = (ticket_price as u128 * (BASIS_POINTS - house_edge) as u128) 
-//             / BASIS_POINTS as u128;
-
-//         // Dynamic minimum probability (at least 0.1% or 1/(10*value_ratio))
-//         let min_prob = (BASIS_POINTS / (10 * (item_value / payout_per_ticket).max(1) as u32)
-//             .max(MIN_PROBABILITY));
-
-//         // Fair probability calculation
-//         let fair_prob = (payout_per_ticket * BASIS_POINTS as u128 / item_value as u128) as u32;
-        
-//         Ok(fair_prob.max(min_prob))
-//     }
-
-//     fn normalise_and_adjust(
-//         mut probabilities: Vec<u32>,
-//         total_probability: u32,
-//         mut house_edge: u32,
-//         item_values: &[u64],
-//         ticket_price: u64,
-//     ) -> Result<(Vec<u32>, u32)> {
-//         if total_probability == 0 {
-//             return Err(ErrorCode::MathOverflow.into());
-//         }
-
-//         // First normalization pass
-//         if total_probability > BASIS_POINTS {
-//             // Scale down probabilities proportionally
-//             for prob in &mut probabilities {
-//                 *prob = (*prob as u128 * BASIS_POINTS as u128 / total_probability as u128) as u32;
-//             }
-//         } else if total_probability < BASIS_POINTS {
-//             // If under 100%, we can afford to reduce house edge
-//             let missing_prob = BASIS_POINTS - total_probability;
-//             let edge_reduction = (missing_prob * house_edge) / BASIS_POINTS;
-//             house_edge = house_edge.saturating_sub(edge_reduction);
+        for item in &mut self.items {
+            // Weight based on how many tickets needed to buy the product
+            let tickets_needed = (item.value as f64) / (self.ticket_price as f64);
             
-//             // Recalculate with new edge
-//             return Self::calculate_probabilities(item_values, ticket_price);
-//         }
+            // Higher value items have exponentially lower probability
+            // Using power of 1.5 as in original code
+            item.weight = 1.0 / tickets_needed.powf(1.5).max(f64::MIN_POSITIVE);
+            self.total_weight += item.weight;
+        }
 
-//         // Second pass: Ensure no single item dominates
-//         let max_prob = *probabilities.iter().max().unwrap_or(&0);
-//         if max_prob > BASIS_POINTS / 2 {
-//             // If any item has >50% chance, adjust
-//             house_edge = house_edge.saturating_add(500); // +5% edge
-//             return Self::calculate_probabilities(item_values, ticket_price);
-//         }
+        self.normalize_probabilities();
+    }
 
-//         Ok((probabilities, house_edge))
+    fn normalize_probabilities(&mut self) {
+        // Calculate individual probabilities and normalize to sum to 10000
+        let mut total_probability = 0u32;
+        
+        // Store the length to avoid borrowing issues
+        let items_len = self.items.len();
+        
+        for item in &mut self.items {
+            let probability_float = item.weight / self.total_weight.max(f64::MIN_POSITIVE);
+            // Scale by 10000 for precision
+            item.probability = (probability_float * 10000.0).round() as u32;
+            total_probability = total_probability.saturating_add(item.probability);
+        }
+
+        // Normalize probabilities to ensure they sum exactly to 10000
+        if total_probability > 0 && total_probability != 10000 {
+            let scale_factor = 10000.0 / (total_probability as f64);
+            let mut running_total = 0u32;
+            
+            for (i, item) in self.items.iter_mut().enumerate() {
+                if i == items_len - 1 {
+                    // Last item gets the remainder to ensure exact sum of 10000
+                    item.probability = 10000 - running_total;
+                } else {
+                    item.probability = ((item.probability as f64) * scale_factor).round() as u32;
+                    running_total = running_total.saturating_add(item.probability);
+                }
+            }
+        }
+    }
+
+    // Get probability of a specific item (returns value between 0.0 and 1.0)
+    pub fn get_probability_of_item(&self, item_name: &str) -> f64 {
+        self.items
+            .iter()
+            .find(|item| item.name == item_name)
+            .map(|item| (item.probability as f64) / 10000.0)
+            .unwrap_or(0.0)
+    }
+
+    // Get probability of getting a specific item at least once in k spins
+    pub fn get_probability_in_k_spins(&self, item_name: &str, spins: u32) -> f64 {
+        let single_probability = self.get_probability_of_item(item_name);
+        1.0 - (1.0 - single_probability).powi(spins as i32)
+    }
+
+    // Calculate expected number of spins to get a specific item
+    pub fn get_expected_spins_for_item(&self, item_name: &str) -> f64 {
+        let probability = self.get_probability_of_item(item_name);
+        if probability <= 0.0 {
+            return f64::INFINITY;
+        }
+        1.0 / probability
+    }
+
+    // Get all items with their calculated probabilities
+    pub fn get_items_with_probabilities(&self) -> Vec<(String, u64, u32)> {
+        self.items
+            .iter()
+            .map(|item| (item.name.clone(), item.value, item.probability))
+            .collect()
+    }
+
+    // Validate that probabilities sum to 10000 (100%)
+    pub fn validate_probabilities(&self) -> bool {
+        let total: u32 = self.items.iter().map(|item| item.probability).sum();
+        total == 10000
+    }
+
+    // Get profitability analysis for an item
+    pub fn get_profitability_analysis(&self, item_name: &str) -> Option<ProfitabilityAnalysis> {
+        let item = self.items.iter().find(|item| item.name == item_name)?;
+        let expected_spins = self.get_expected_spins_for_item(item_name);
+        
+        if !expected_spins.is_finite() {
+            return None;
+        }
+
+        let expected_cost = expected_spins * (self.ticket_price as f64);
+        let profit = (item.value as f64) - expected_cost;
+        let profit_ratio = profit / expected_cost.max(f64::MIN_POSITIVE);
+
+        Some(ProfitabilityAnalysis {
+            item_name: item_name.to_string(),
+            expected_spins,
+            expected_cost,
+            item_value: item.value,
+            profit,
+            profit_ratio,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct ProfitabilityAnalysis {
+    pub item_name: String,
+    pub expected_spins: f64,
+    pub expected_cost: f64,
+    pub item_value: u64,
+    pub profit: f64,
+    pub profit_ratio: f64,
+}
+
+// Custom error types for this module
+#[derive(Debug)]
+pub enum ProbabilityError {
+    NoItemsProvided,
+    InvalidProbabilityCalculation,
+}
+
+impl From<ProbabilityError> for anchor_lang::error::Error {
+    fn from(err: ProbabilityError) -> Self {
+        match err {
+            ProbabilityError::NoItemsProvided => {
+                anchor_lang::error::Error::from(crate::ErrorCode::NoItemsProvided)
+            }
+            ProbabilityError::InvalidProbabilityCalculation => {
+                anchor_lang::error::Error::from(crate::ErrorCode::InvalidProbabilityCalculation)
+            }
+        }
+    }
+}
+
+// Utility functions for Solana program integration
+pub fn calculate_item_probabilities(
+    items: &[(String, u64)],
+    ticket_price: u64,
+) -> Result<Vec<u32>> {
+    if items.is_empty() {
+        return Err(crate::ErrorCode::NoItemsProvided.into());
+    }
+
+    let calculator = WeightedProbabilityCalculator::new(items.to_vec(), ticket_price);
+    
+    if !calculator.validate_probabilities() {
+        return Err(crate::ErrorCode::InvalidProbabilityCalculation.into());
+    }
+
+    Ok(calculator.items.iter().map(|item| item.probability).collect())
+}
+
+// Select winning item based on weighted probabilities
+pub fn select_winning_item_index(
+    probabilities: &[u32],
+    random_seed: u64,
+) -> Option<usize> {
+    let total_weight: u32 = probabilities.iter().sum();
+    if total_weight == 0 {
+        return None;
+    }
+
+    let random_value = (random_seed % total_weight as u64) as u32;
+    let mut cumulative_weight = 0u32;
+    
+    for (index, &weight) in probabilities.iter().enumerate() {
+        cumulative_weight = cumulative_weight.saturating_add(weight);
+        if random_value < cumulative_weight {
+            return Some(index);
+        }
+    }
+    
+    None
+}
+
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
+//     use approx::assert_relative_eq;
+
+//     #[test]
+//     fn test_probability_calculation() {
+//         let items = vec![
+//             ("iPhone".to_string(), 10),
+//             ("iPad".to_string(), 50),
+//             ("MacBook".to_string(), 200),
+//             ("AirPods".to_string(), 1000),
+//         ];
+        
+//         let calculator = WeightedProbabilityCalculator::new(items, 100);
+        
+//         // Verify probabilities sum to 10000 (100%)
+//         assert!(calculator.validate_probabilities());
+        
+//         // Higher value items should have lower probability
+//         let iphone_prob = calculator.get_probability_of_item("iPhone");
+//         let airpods_prob = calculator.get_probability_of_item("AirPods");
+        
+//         assert!(iphone_prob > airpods_prob);
 //     }
 
-//     pub fn create_weighted_list(items: &[PoolItem]) -> Vec<usize> {
-//         let mut weighted_list = Vec::new();
-//         let total_prob: u32 = items.iter().map(|i| i.probability).sum();
-        
-//         // Use floating-point for accurate distribution
-//         let scale_factor = 10_000.0 / total_prob as f64;
-
-//         for (idx, item) in items.iter().enumerate() {
-//             if !item.available {
-//                 continue;
-//             }
-
-//             let weight = ((item.probability as f64 * scale_factor).round() as u32).max(1);
-//             weighted_list.extend(std::iter::repeat(idx).take(weight as usize));
-//         }
-
-//         weighted_list
+//     #[test]
+//     fn test_single_item() {
+//         let single_item = vec![("Prize".to_string(), 100)];
+//         let calc = WeightedProbabilityCalculator::new(single_item, 10);
+//         assert_eq!(calc.items[0].probability, 10000);
 //     }
 
-//     pub fn select_random_item(
-//         weighted_list: &[usize],
-//         seed: i64,
-//         user_key: Pubkey,
-//     ) -> Result<usize> {
-//         require!(!weighted_list.is_empty(), ErrorCode::NoItemsAvailable);
+//     #[test]
+//     fn test_equal_value_items() {
+//         let equal_items = vec![
+//             ("A".to_string(), 100),
+//             ("B".to_string(), 100),
+//             ("C".to_string(), 100)
+//         ];
+//         let calc = WeightedProbabilityCalculator::new(equal_items, 10);
+//         assert!((3333..=3334).contains(&calc.items[0].probability));
+//     }
 
-//         // More robust randomness using multiple hash bytes
-//         let hash_input = format!("{}{}{}", seed, user_key, Clock::get()?.unix_timestamp);
-//         let hash_result = hash(hash_input.as_bytes());
+//     #[test]
+//     fn test_random_selection_distribution() {
+//         let items = vec![
+//             ("Common".to_string(), 100),  // ~70%
+//             ("Rare".to_string(), 500),    // ~20%
+//             ("Legendary".to_string(), 2000) // ~10%
+//         ];
         
-//         let bytes = hash_result.as_ref();
-//         let random_num = u64::from_le_bytes([
-//             bytes[0], bytes[1], bytes[2], bytes[3], 
-//             bytes[4], bytes[5], bytes[6], bytes[7]
-//         ]) as usize % weighted_list.len();
+//         let calc = WeightedProbabilityCalculator::new(items, 10);
+//         let mut results = [0, 0, 0];
+        
+//         // Simulate 10,000 spins
+//         for seed in 0..10_000 {
+//             let winner = select_winning_item_index(
+//                 &calc.items.iter().map(|i| i.probability).collect::<Vec<_>>(),
+//                 seed
+//             ).unwrap();
+//             results[winner] += 1;
+//         }
+        
+//         // Verify distribution is roughly correct
+//         assert!(results[0] > 6500 && results[0] < 7500); // Common
+//         assert!(results[1] > 1500 && results[1] < 2500); // Rare
+//         assert!(results[2] > 500 && results[2] < 1500);  // Legendary
+//     }
 
-//         Ok(weighted_list[random_num])
+//     #[test]
+//     fn test_probability_math() {
+//         let items = vec![
+//             ("A".to_string(), 100),
+//             ("B".to_string(), 200)
+//         ];
+        
+//         let calc = WeightedProbabilityCalculator::new(items, 10);
+        
+//         // Test probability calculations
+//         let prob_a = calc.get_probability_of_item("A");
+//         let prob_b = calc.get_probability_of_item("B");
+        
+//         assert_relative_eq!(prob_a + prob_b, 1.0, epsilon = 0.0001);
+        
+//         // Test expected spins
+//         let expected_a = calc.get_expected_spins_for_item("A");
+//         assert_relative_eq!(expected_a, 1.0 / prob_a, epsilon = 0.0001);
+        
+//         // Test probability in k spins
+//         let prob_in_10 = calc.get_probability_in_k_spins("A", 10);
+//         assert_relative_eq!(
+//             prob_in_10,
+//             1.0 - (1.0 - prob_a).powi(10),
+//             epsilon = 0.0001
+//         );
 //     }
 // }
