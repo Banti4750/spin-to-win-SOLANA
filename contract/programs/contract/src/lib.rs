@@ -16,7 +16,7 @@ pub mod company_pool {
         company_name: String,
         company_image: String,
         items: Vec<PoolItemInput>,
-     ) -> Result<()> {
+    ) -> Result<()> {
         let company_pool = &mut ctx.accounts.company_pool;
         let clock = Clock::get()?;
 
@@ -93,7 +93,10 @@ pub mod company_pool {
 
         // Verify probabilities sum correctly
         let total_probability: u32 = company_pool.items.iter().map(|item| item.probability).sum();
-        require!(total_probability == 10000, ErrorCode::ProbabilitySumMismatch);
+        require!(
+            total_probability == 10000,
+            ErrorCode::ProbabilitySumMismatch
+        );
 
         // Create the vault PDA
         let rent = Rent::get()?;
@@ -104,10 +107,8 @@ pub mod company_pool {
                 from: ctx.accounts.authority.to_account_info(),
                 to: ctx.accounts.pool_vault.to_account_info(),
             };
-            let cpi_context = CpiContext::new(
-                ctx.accounts.system_program.to_account_info(),
-                cpi_accounts,
-            );
+            let cpi_context =
+                CpiContext::new(ctx.accounts.system_program.to_account_info(), cpi_accounts);
             anchor_lang::system_program::transfer(cpi_context, minimum_balance)?;
         }
 
@@ -137,11 +138,17 @@ pub mod company_pool {
             from: ctx.accounts.buyer.to_account_info(),
             to: ctx.accounts.pool_vault.to_account_info(),
         };
-        let cpi_context = CpiContext::new(
-            ctx.accounts.system_program.to_account_info(),
-            cpi_accounts,
-        );
+        let cpi_context =
+            CpiContext::new(ctx.accounts.system_program.to_account_info(), cpi_accounts);
         anchor_lang::system_program::transfer(cpi_context, ticket_price)?;
+
+        // Initialize the ticket account
+        let user_ticket = &mut ctx.accounts.user_ticket;
+        user_ticket.owner = ctx.accounts.buyer.key();
+        user_ticket.company_pool = company_pool.key();
+        user_ticket.purchased_at = clock.unix_timestamp;
+        user_ticket.used = false;
+        user_ticket.ticket_id = company_pool.total_tickets_sold;
 
         // Update the company pool state
         company_pool.total_tickets_sold = company_pool
@@ -159,6 +166,7 @@ pub mod company_pool {
             buyer: ctx.accounts.buyer.key(),
             ticket_price,
             total_tickets_sold: company_pool.total_tickets_sold,
+            ticket_id: user_ticket.ticket_id,
             timestamp: clock.unix_timestamp,
         });
 
@@ -235,14 +243,30 @@ pub mod company_pool {
 
     pub fn record_spin_result(ctx: Context<RecordSpinResult>) -> Result<()> {
         let company_pool = &mut ctx.accounts.company_pool;
+        let user_ticket = &mut ctx.accounts.user_ticket;
         let clock = Clock::get()?;
-        
+
         // Validate pool state
         require!(company_pool.active, ErrorCode::PoolInactive);
         require!(!company_pool.items.is_empty(), ErrorCode::NoItemsProvided);
-        
+
+        // CRITICAL: Validate ticket ownership and usage
+        require!(
+            user_ticket.owner == ctx.accounts.spinner.key(),
+            ErrorCode::NotTicketOwner
+        );
+        require!(
+            user_ticket.company_pool == company_pool.key(),
+            ErrorCode::InvalidTicketPool
+        );
+        require!(!user_ticket.used, ErrorCode::TicketAlreadyUsed);
+
+        // Mark ticket as used
+        user_ticket.used = true;
+
         // Get available items with their pre-calculated probabilities
-        let available_items: Vec<(usize, &PoolItem)> = company_pool.items
+        let available_items: Vec<(usize, &PoolItem)> = company_pool
+            .items
             .iter()
             .enumerate()
             .filter(|(_, item)| item.available && item.probability > 0)
@@ -258,7 +282,8 @@ pub mod company_pool {
                 .fold(0u64, |acc, (i, &byte)| acc ^ ((byte as u64) << (i * 8)))
             ^ company_pool.total_tickets_sold
             ^ ctx.accounts.pool_vault.lamports()
-            ^ (clock.slot as u64);
+            ^ (clock.slot as u64)
+            ^ user_ticket.ticket_id; // Add ticket ID to randomness
 
         // Extract probabilities for available items
         let probabilities: Vec<u32> = available_items
@@ -271,18 +296,22 @@ pub mod company_pool {
             .ok_or(ErrorCode::ProbabilitySelectionFailed)?;
 
         let (actual_index, winning_item) = available_items[winning_index];
-        
+
         // Clone the winning item for the event
         let won_item = winning_item.clone();
-        
+
         // Log detailed winning information
         msg!("🎉 SPIN RESULT 🎉");
         msg!("Winner: {}", ctx.accounts.spinner.key());
         msg!("Won Item: {}", winning_item.name);
         msg!("Item Value: {} SOL", winning_item.price);
-        msg!("Win Probability: {}%", (winning_item.probability as f64) / 100.0);
+        msg!(
+            "Win Probability: {}%",
+            (winning_item.probability as f64) / 100.0
+        );
         msg!("Random Seed: {}", random_seed);
-        
+        msg!("Ticket ID: {}", user_ticket.ticket_id);
+
         // Emit success event
         emit!(SpinResultEvent {
             spinner: ctx.accounts.spinner.key(),
@@ -291,6 +320,7 @@ pub mod company_pool {
             item_value: winning_item.price,
             win_probability: winning_item.probability,
             random_seed,
+            ticket_id: user_ticket.ticket_id,
             timestamp: clock.unix_timestamp,
         });
 
@@ -299,14 +329,16 @@ pub mod company_pool {
 
     pub fn get_probability_analysis(ctx: Context<GetProbabilityAnalysis>) -> Result<()> {
         let company_pool = &ctx.accounts.company_pool;
-        
+
         // Create probability calculator for analysis
-        let items_for_analysis: Vec<(String, u64)> = company_pool.items
+        let items_for_analysis: Vec<(String, u64)> = company_pool
+            .items
             .iter()
             .map(|item| (item.name.clone(), item.price))
             .collect();
 
-        let calculator = WeightedProbabilityCalculator::new(items_for_analysis, company_pool.ticket_price);
+        let calculator =
+            WeightedProbabilityCalculator::new(items_for_analysis, company_pool.ticket_price);
 
         // Emit analysis event for each item
         for item in &company_pool.items {
@@ -325,11 +357,23 @@ pub mod company_pool {
 
         Ok(())
     }
+
+    pub fn get_user_tickets(ctx: Context<GetUserTickets>) -> Result<()> {
+        // This function can be used to query user tickets
+        // Implementation depends on your specific needs
+        Ok(())
+    }
 }
 
+// Account Structures
 #[derive(Accounts)]
 pub struct GetProbabilityAnalysis<'info> {
     pub company_pool: Account<'info, CompanyPool>,
+}
+
+#[derive(Accounts)]
+pub struct GetUserTickets<'info> {
+    pub user: Signer<'info>,
 }
 
 #[derive(Accounts)]
@@ -339,10 +383,18 @@ pub struct RecordSpinResult<'info> {
         constraint = company_pool.active @ ErrorCode::PoolInactive
     )]
     pub company_pool: Account<'info, CompanyPool>,
-    
+
+    #[account(
+        mut,
+        constraint = user_ticket.owner == spinner.key() @ ErrorCode::NotTicketOwner,
+        constraint = user_ticket.company_pool == company_pool.key() @ ErrorCode::InvalidTicketPool,
+        constraint = !user_ticket.used @ ErrorCode::TicketAlreadyUsed
+    )]
+    pub user_ticket: Account<'info, UserTicket>,
+
     #[account(mut)]
     pub spinner: Signer<'info>,
-    
+
     /// CHECK: This is the pool vault PDA that holds the funds
     #[account(
         mut,
@@ -380,6 +432,20 @@ pub struct WithdrawFundsFromVault<'info> {
 pub struct BuyTicket<'info> {
     #[account(mut)]
     pub company_pool: Account<'info, CompanyPool>,
+
+    #[account(
+        init,
+        payer = buyer,
+        space = UserTicket::SPACE,
+        seeds = [
+        b"user_ticket",
+        buyer.key().as_ref(),
+        company_pool.key().as_ref(),
+        &company_pool.total_tickets_sold.to_le_bytes()
+        ],
+        bump
+    )]
+    pub user_ticket: Account<'info, UserTicket>,
 
     #[account(mut)]
     pub buyer: Signer<'info>,
@@ -420,6 +486,7 @@ pub struct InitializeCompanyPool<'info> {
     pub system_program: Program<'info, System>,
 }
 
+// Data Structures
 #[account]
 pub struct CompanyPool {
     pub authority: Pubkey,
@@ -436,6 +503,19 @@ pub struct CompanyPool {
 
 impl CompanyPool {
     pub const SPACE: usize = 8 + 32 + 54 + 204 + 8 + 4 + (10 * 471) + 8 + 8 + 8 + 1 + 8;
+}
+
+#[account]
+pub struct UserTicket {
+    pub owner: Pubkey,
+    pub company_pool: Pubkey,
+    pub purchased_at: i64,
+    pub used: bool,
+    pub ticket_id: u64,
+}
+
+impl UserTicket {
+    pub const SPACE: usize = 8 + 32 + 32 + 8 + 1 + 8;
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
@@ -456,6 +536,7 @@ pub struct PoolItemInput {
     pub description: String,
 }
 
+// Events
 #[event]
 pub struct SpinResultEvent {
     pub spinner: Pubkey,
@@ -464,6 +545,7 @@ pub struct SpinResultEvent {
     pub item_value: u64,
     pub win_probability: u32,
     pub random_seed: u64,
+    pub ticket_id: u64,
     pub timestamp: i64,
 }
 
@@ -492,6 +574,7 @@ pub struct TicketPurchasedEvent {
     pub buyer: Pubkey,
     pub ticket_price: u64,
     pub total_tickets_sold: u64,
+    pub ticket_id: u64,
     pub timestamp: i64,
 }
 
@@ -503,6 +586,7 @@ pub struct FundsWithdrawnEvent {
     pub timestamp: i64,
 }
 
+// Error Codes
 #[error_code]
 pub enum ErrorCode {
     #[msg("Ticket price must be greater than 0")]
@@ -547,4 +631,10 @@ pub enum ErrorCode {
     ProbabilitySumMismatch,
     #[msg("Failed to select winning item")]
     ProbabilitySelectionFailed,
+    #[msg("You don't own this ticket")]
+    NotTicketOwner,
+    #[msg("Ticket belongs to different pool")]
+    InvalidTicketPool,
+    #[msg("This ticket has already been used")]
+    TicketAlreadyUsed,
 }
