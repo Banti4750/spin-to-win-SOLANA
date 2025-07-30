@@ -30,7 +30,6 @@ pub mod company_pool {
         // Validate all items before processing
         for item in &items {
             require!(item.price > 0, ErrorCode::InvalidItemPrice);
-            // require!(item.price >= ticket_price, ErrorCode::ItemPriceTooLow);
             require!(item.name.len() <= 50, ErrorCode::ItemNameTooLong);
             require!(item.image.len() <= 200, ErrorCode::ItemImageTooLong);
             require!(
@@ -68,7 +67,7 @@ pub mod company_pool {
                 price: item.price,
                 name: item.name,
                 description: item.description,
-                probability: probabilities[i], // Pre-calculated probability
+                probability: probabilities[i],
                 available: true,
             });
 
@@ -86,7 +85,7 @@ pub mod company_pool {
             msg!(
                 "{}: {}% (Value: {} SOL)",
                 item.name,
-                (item.probability as f64) / 100.0, // Convert to percentage
+                (item.probability as f64) / 100.0,
                 item.price
             );
         }
@@ -149,6 +148,8 @@ pub mod company_pool {
         user_ticket.purchased_at = clock.unix_timestamp;
         user_ticket.used = false;
         user_ticket.ticket_id = company_pool.total_tickets_sold;
+        user_ticket.won_item = None; // Initialize as no item won yet
+        user_ticket.reward_claimed = false; // Initialize as not claimed
 
         // Update the company pool state
         company_pool.total_tickets_sold = company_pool
@@ -283,7 +284,7 @@ pub mod company_pool {
             ^ company_pool.total_tickets_sold
             ^ ctx.accounts.pool_vault.lamports()
             ^ (clock.slot as u64)
-            ^ user_ticket.ticket_id; // Add ticket ID to randomness
+            ^ user_ticket.ticket_id;
 
         // Extract probabilities for available items
         let probabilities: Vec<u32> = available_items
@@ -296,6 +297,15 @@ pub mod company_pool {
             .ok_or(ErrorCode::ProbabilitySelectionFailed)?;
 
         let (actual_index, winning_item) = available_items[winning_index];
+
+        // Store the won item in the ticket for later claiming
+        user_ticket.won_item = Some(WonItem {
+            name: winning_item.name.clone(),
+            price: winning_item.price,
+            image: winning_item.image.clone(),
+            description: winning_item.description.clone(),
+            item_index: actual_index as u32,
+        });
 
         // Clone the winning item for the event
         let won_item = winning_item.clone();
@@ -321,6 +331,87 @@ pub mod company_pool {
             win_probability: winning_item.probability,
             random_seed,
             ticket_id: user_ticket.ticket_id,
+            timestamp: clock.unix_timestamp,
+        });
+
+        Ok(())
+    }
+
+    pub fn claim_reward(ctx: Context<ClaimReward>) -> Result<()> {
+        let company_pool = &mut ctx.accounts.company_pool;
+        let user_ticket = &mut ctx.accounts.user_ticket;
+        let clock = Clock::get()?;
+
+        // Validate pool state
+        require!(company_pool.active, ErrorCode::PoolInactive);
+
+        // Validate ticket ownership and state
+        require!(
+            user_ticket.owner == ctx.accounts.spinner.key(),
+            ErrorCode::NotTicketOwner
+        );
+        require!(
+            user_ticket.company_pool == company_pool.key(),
+            ErrorCode::InvalidTicketPool
+        );
+        require!(user_ticket.used, ErrorCode::TicketNotUsed);
+        require!(!user_ticket.reward_claimed, ErrorCode::RewardAlreadyClaimed);
+
+        // Check if user won an item and clone it to avoid borrowing issues
+        let won_item = user_ticket.won_item.as_ref()
+            .ok_or(ErrorCode::NoRewardToClaim)?
+            .clone();
+
+        let reward_amount = won_item.price;
+
+        // Validate vault has sufficient funds
+        let vault_balance = ctx.accounts.pool_vault.lamports();
+        let rent_exempt_minimum = Rent::get()?.minimum_balance(0);
+        let available_balance = vault_balance.saturating_sub(rent_exempt_minimum);
+
+        require!(
+            reward_amount <= available_balance,
+            ErrorCode::InsufficientVaultFunds
+        );
+
+        // Create seeds for PDA signing
+        let company_name_bytes = company_pool.company_name.as_bytes();
+        let seeds = &[b"pool_vault", company_name_bytes, &[ctx.bumps.pool_vault]];
+        let signer_seeds = &[&seeds[..]];
+
+        // Transfer reward from vault to winner
+        let cpi_accounts = anchor_lang::system_program::Transfer {
+            from: ctx.accounts.pool_vault.to_account_info(),
+            to: ctx.accounts.spinner.to_account_info(),
+        };
+        let cpi_context = CpiContext::new_with_signer(
+            ctx.accounts.system_program.to_account_info(),
+            cpi_accounts,
+            signer_seeds,
+        );
+        anchor_lang::system_program::transfer(cpi_context, reward_amount)?;
+
+        // Mark reward as claimed
+        user_ticket.reward_claimed = true;
+
+        // Update pool's total funds (tracking purposes)
+        company_pool.total_funds = company_pool
+            .total_funds
+            .saturating_sub(reward_amount);
+
+        // Log reward claim
+        msg!("🎁 REWARD CLAIMED 🎁");
+        msg!("Winner: {}", ctx.accounts.spinner.key());
+        msg!("Item: {}", won_item.name);
+        msg!("Reward Amount: {} lamports", reward_amount);
+        msg!("Ticket ID: {}", user_ticket.ticket_id);
+
+        // Emit reward claimed event
+        emit!(RewardClaimedEvent {
+            winner: ctx.accounts.spinner.key(),
+            ticket_id: user_ticket.ticket_id,
+            won_item: won_item.clone(),
+            reward_amount,
             timestamp: clock.unix_timestamp,
         });
 
@@ -358,11 +449,42 @@ pub mod company_pool {
         Ok(())
     }
 
-    pub fn get_user_tickets(ctx: Context<GetUserTickets>) -> Result<()> {
+    pub fn get_user_tickets(_ctx: Context<GetUserTickets>) -> Result<()> {
         // This function can be used to query user tickets
         // Implementation depends on your specific needs
         Ok(())
     }
+}
+
+#[derive(Accounts)]
+pub struct ClaimReward<'info> {
+    #[account(
+        mut,
+        constraint = company_pool.active @ ErrorCode::PoolInactive
+    )]
+    pub company_pool: Account<'info, CompanyPool>,
+
+    #[account(
+        mut,
+        constraint = user_ticket.owner == spinner.key() @ ErrorCode::NotTicketOwner,
+        constraint = user_ticket.company_pool == company_pool.key() @ ErrorCode::InvalidTicketPool,
+        constraint = user_ticket.used @ ErrorCode::TicketNotUsed,
+        constraint = !user_ticket.reward_claimed @ ErrorCode::RewardAlreadyClaimed
+    )]
+    pub user_ticket: Account<'info, UserTicket>,
+
+    #[account(mut)]
+    pub spinner: Signer<'info>,
+
+    /// CHECK: This is the pool vault PDA that holds the funds
+    #[account(
+        mut,
+        seeds = [b"pool_vault", company_pool.company_name.as_bytes()],
+        bump,
+    )]
+    pub pool_vault: AccountInfo<'info>,
+
+    pub system_program: Program<'info, System>,
 }
 
 // Account Structures
@@ -512,10 +634,13 @@ pub struct UserTicket {
     pub purchased_at: i64,
     pub used: bool,
     pub ticket_id: u64,
+    pub won_item: Option<WonItem>, // Store the item they won
+    pub reward_claimed: bool, // Track if reward has been claimed
 }
 
 impl UserTicket {
-    pub const SPACE: usize = 8 + 32 + 32 + 8 + 1 + 8;
+    // Updated space calculation to include new fields
+    pub const SPACE: usize = 8 + 32 + 32 + 8 + 1 + 8 + 1 + (4 + 54 + 8 + 204 + 204 + 4) + 1;
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
@@ -536,7 +661,25 @@ pub struct PoolItemInput {
     pub description: String,
 }
 
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct WonItem {
+    pub name: String,
+    pub price: u64,
+    pub image: String,
+    pub description: String,
+    pub item_index: u32,
+}
+
 // Events
+#[event]
+pub struct RewardClaimedEvent {
+    pub winner: Pubkey,
+    pub ticket_id: u64,
+    pub won_item: WonItem,
+    pub reward_amount: u64,
+    pub timestamp: i64,
+}
+
 #[event]
 pub struct SpinResultEvent {
     pub spinner: Pubkey,
@@ -637,4 +780,10 @@ pub enum ErrorCode {
     InvalidTicketPool,
     #[msg("This ticket has already been used")]
     TicketAlreadyUsed,
+    #[msg("Ticket must be used (spun) before claiming reward")]
+    TicketNotUsed,
+    #[msg("Reward has already been claimed")]
+    RewardAlreadyClaimed,
+    #[msg("No reward to claim for this ticket")]
+    NoRewardToClaim,
 }

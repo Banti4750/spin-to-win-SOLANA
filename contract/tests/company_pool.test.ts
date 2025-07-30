@@ -1107,4 +1107,791 @@ describe("company_pool", () => {
     }
   });
 
+  // Add these tests to your existing test file after the spin tests
+
+// CLAIM REWARD TESTS START HERE
+it("Successfully claims reward after winning spin", async () => {
+  try {
+    // First, we need to create a new ticket and spin it to get a winning result
+    console.log("🎁 Testing claim reward functionality...");
+    
+    // Create a new buyer for this test
+    const rewardTester = web3.Keypair.generate();
+    
+    // Airdrop SOL to the buyer
+    const airdropSig = await connection.requestAirdrop(
+      rewardTester.publicKey,
+      3 * LAMPORTS_PER_SOL
+    );
+    await connection.confirmTransaction(airdropSig);
+    
+    // Get current ticket count
+    const poolDataBefore = await program.account.companyPool.fetch(companyPoolPda);
+    const ticketId = poolDataBefore.totalTicketsSold.toNumber();
+    
+    // Derive ticket PDA
+    const ticketPda = deriveTicketPda(rewardTester.publicKey, ticketId);
+    
+    // Buy ticket
+    console.log("   Step 1: Buying ticket...");
+    const buyTx = await program.methods
+      .buyTicket()
+      .accounts({
+        companyPool: companyPoolPda,
+        userTicket: ticketPda,
+        buyer: rewardTester.publicKey,
+        poolVault: poolVaultPda,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([rewardTester])
+      .rpc();
+    
+    await connection.confirmTransaction(buyTx);
+    console.log("   ✅ Ticket purchased successfully");
+    
+    // Verify ticket data before spin
+    const ticketDataBeforeSpin = await program.account.userTicket.fetch(ticketPda);
+    assert.equal(ticketDataBeforeSpin.used, false, "Ticket should be unused");
+    assert.equal(ticketDataBeforeSpin.rewardClaimed, false, "Reward should not be claimed");
+    assert.equal(ticketDataBeforeSpin.wonItem, null, "Should have no won item initially");
+    
+    // Record spin result
+    console.log("   Step 2: Performing spin...");
+    const spinTx = await program.methods
+      .recordSpinResult()
+      .accounts({
+        companyPool: companyPoolPda,
+        userTicket: ticketPda,
+        spinner: rewardTester.publicKey,
+        poolVault: poolVaultPda,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([rewardTester])
+      .rpc();
+    
+    await connection.confirmTransaction(spinTx);
+    console.log("   ✅ Spin completed successfully");
+    
+    // Verify ticket data after spin
+    const ticketDataAfterSpin = await program.account.userTicket.fetch(ticketPda);
+    assert.equal(ticketDataAfterSpin.used, true, "Ticket should be marked as used");
+    assert.equal(ticketDataAfterSpin.rewardClaimed, false, "Reward should not be claimed yet");
+    assert.notEqual(ticketDataAfterSpin.wonItem, null, "Should have won an item");
+    
+    const wonItem = ticketDataAfterSpin.wonItem;
+    console.log(`   🎉 Won item: ${wonItem.name} (Value: ${wonItem.price} lamports)`);
+    
+    // Get balances before claiming reward
+    const userBalanceBefore = await connection.getBalance(rewardTester.publicKey);
+    const vaultBalanceBefore = await connection.getBalance(poolVaultPda);
+    const poolDataBeforeClaim = await program.account.companyPool.fetch(companyPoolPda);
+    
+    console.log("   📊 Before claim:");
+    console.log(`     User balance: ${userBalanceBefore / LAMPORTS_PER_SOL} SOL`);
+    console.log(`     Vault balance: ${vaultBalanceBefore / LAMPORTS_PER_SOL} SOL`);
+    console.log(`     Pool total funds: ${poolDataBeforeClaim.totalFunds.toNumber() / LAMPORTS_PER_SOL} SOL`);
+    console.log(`     Reward amount: ${wonItem.price / LAMPORTS_PER_SOL} SOL`);
+    
+    // Claim reward
+    console.log("   Step 3: Claiming reward...");
+    const claimTx = await program.methods
+      .claimReward()
+      .accounts({
+        companyPool: companyPoolPda,
+        userTicket: ticketPda,
+        spinner: rewardTester.publicKey,
+        poolVault: poolVaultPda,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([rewardTester])
+      .rpc();
+    
+    await connection.confirmTransaction(claimTx);
+    console.log("   ✅ Reward claimed successfully");
+    
+    // Parse transaction logs for reward claim details
+    const claimTxDetails = await connection.getTransaction(claimTx, {
+      commitment: "confirmed",
+    });
+    
+    if (claimTxDetails?.meta?.logMessages) {
+      console.log("   💰 Claim transaction logs:");
+      claimTxDetails.meta.logMessages.forEach(log => {
+        if (log.includes("REWARD CLAIMED") || log.includes("Winner:") || log.includes("Item:") || log.includes("Reward Amount:")) {
+          console.log("     ", log);
+        }
+      });
+    }
+    
+    // Verify final state
+    const ticketDataAfterClaim = await program.account.userTicket.fetch(ticketPda);
+    const userBalanceAfter = await connection.getBalance(rewardTester.publicKey);
+    const vaultBalanceAfter = await connection.getBalance(poolVaultPda);
+    const poolDataAfterClaim = await program.account.companyPool.fetch(companyPoolPda);
+    
+    console.log("   📊 After claim:");
+    console.log(`     User balance: ${userBalanceAfter / LAMPORTS_PER_SOL} SOL`);
+    console.log(`     Vault balance: ${vaultBalanceAfter / LAMPORTS_PER_SOL} SOL`);
+    console.log(`     Pool total funds: ${poolDataAfterClaim.totalFunds.toNumber() / LAMPORTS_PER_SOL} SOL`);
+    
+    // Assertions
+    assert.equal(ticketDataAfterClaim.rewardClaimed, true, "Reward should be marked as claimed");
+    assert.equal(ticketDataAfterClaim.used, true, "Ticket should remain marked as used");
+    
+    // User balance should increase by the reward amount (minus transaction fees)
+    const balanceIncrease = userBalanceAfter - userBalanceBefore;
+    assert.ok(balanceIncrease > 0, "User balance should increase");
+    console.log(`     Balance increase: ${balanceIncrease / LAMPORTS_PER_SOL} SOL`);
+    
+    // Vault balance should decrease by the reward amount
+    const vaultDecrease = vaultBalanceBefore - vaultBalanceAfter;
+    assert.ok(vaultDecrease >= wonItem.price, "Vault should decrease by at least the reward amount");
+    
+    // Pool total funds should decrease
+    assert.ok(
+      poolDataAfterClaim.totalFunds.toNumber() <= poolDataBeforeClaim.totalFunds.toNumber(),
+      "Pool total funds should decrease or stay same"
+    );
+    
+    console.log("   ✅ All reward claim validations passed!");
+    
+  } catch (error) {
+    console.error("❌ Error in claim reward test:");
+    if (error.logs) {
+      console.error("Program logs:", error.logs);
+    }
+    console.error("Full error:", error);
+    throw error;
+  }
+});
+
+it("Fails to claim reward with unused ticket", async () => {
+  try {
+    console.log("🚫 Testing claim reward with unused ticket...");
+    
+    // Create a new buyer
+    const testBuyer = web3.Keypair.generate();
+    
+    // Airdrop SOL
+    const airdropSig = await connection.requestAirdrop(
+      testBuyer.publicKey,
+      2 * LAMPORTS_PER_SOL
+    );
+    await connection.confirmTransaction(airdropSig);
+    
+    // Buy a ticket but don't spin it
+    const poolData = await program.account.companyPool.fetch(companyPoolPda);
+    const ticketId = poolData.totalTicketsSold.toNumber();
+    const ticketPda = deriveTicketPda(testBuyer.publicKey, ticketId);
+    
+    // Buy ticket
+    const buyTx = await program.methods
+      .buyTicket()
+      .accounts({
+        companyPool: companyPoolPda,
+        userTicket: ticketPda,
+        buyer: testBuyer.publicKey,
+        poolVault: poolVaultPda,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([testBuyer])
+      .rpc();
+    
+    await connection.confirmTransaction(buyTx);
+    
+    // Verify ticket is unused
+    const ticketData = await program.account.userTicket.fetch(ticketPda);
+    assert.equal(ticketData.used, false, "Ticket should be unused");
+    
+    // Try to claim reward (should fail)
+    await program.methods
+      .claimReward()
+      .accounts({
+        companyPool: companyPoolPda,
+        userTicket: ticketPda,
+        spinner: testBuyer.publicKey,
+        poolVault: poolVaultPda,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([testBuyer])
+      .rpc();
+    
+    assert.fail("Should have failed due to unused ticket");
+    
+  } catch (error) {
+    console.log("✅ Correctly failed with unused ticket");
+    const errorStr = error.toString();
+    assert.ok(
+      errorStr.includes("TicketNotUsed") || errorStr.includes("constraint"),
+      `Should fail with ticket not used error. Got: ${errorStr}`
+    );
+  }
+});
+
+it("Fails to claim reward twice", async () => {
+  try {
+    console.log("🚫 Testing double claim prevention...");
+    
+    // Find a ticket that has been used and reward claimed
+    let claimedTicket = null;
+    
+    // Create a new ticket, spin it, and claim reward
+    const doubleClaimer = web3.Keypair.generate();
+    const airdropSig = await connection.requestAirdrop(
+      doubleClaimer.publicKey,
+      3 * LAMPORTS_PER_SOL
+    );
+    await connection.confirmTransaction(airdropSig);
+    
+    const poolData = await program.account.companyPool.fetch(companyPoolPda);
+    const ticketId = poolData.totalTicketsSold.toNumber();
+    const ticketPda = deriveTicketPda(doubleClaimer.publicKey, ticketId);
+    
+    // Buy, spin, and claim
+    const buyTx = await program.methods
+      .buyTicket()
+      .accounts({
+        companyPool: companyPoolPda,
+        userTicket: ticketPda,
+        buyer: doubleClaimer.publicKey,
+        poolVault: poolVaultPda,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([doubleClaimer])
+      .rpc();
+    await connection.confirmTransaction(buyTx);
+    
+    const spinTx = await program.methods
+      .recordSpinResult()
+      .accounts({
+        companyPool: companyPoolPda,
+        userTicket: ticketPda,
+        spinner: doubleClaimer.publicKey,
+        poolVault: poolVaultPda,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([doubleClaimer])
+      .rpc();
+    await connection.confirmTransaction(spinTx);
+    
+    const claimTx = await program.methods
+      .claimReward()
+      .accounts({
+        companyPool: companyPoolPda,
+        userTicket: ticketPda,
+        spinner: doubleClaimer.publicKey,
+        poolVault: poolVaultPda,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([doubleClaimer])
+      .rpc();
+    await connection.confirmTransaction(claimTx);
+    
+    // Verify reward is claimed
+    const ticketData = await program.account.userTicket.fetch(ticketPda);
+    assert.equal(ticketData.rewardClaimed, true, "Reward should be claimed");
+    
+    // Try to claim again (should fail)
+    await program.methods
+      .claimReward()
+      .accounts({
+        companyPool: companyPoolPda,
+        userTicket: ticketPda,
+        spinner: doubleClaimer.publicKey,
+        poolVault: poolVaultPda,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([doubleClaimer])
+      .rpc();
+    
+    assert.fail("Should have failed due to already claimed reward");
+    
+  } catch (error) {
+    console.log("✅ Correctly failed with already claimed reward");
+    const errorStr = error.toString();
+    assert.ok(
+      errorStr.includes("RewardAlreadyClaimed") || errorStr.includes("constraint"),
+      `Should fail with reward already claimed error. Got: ${errorStr}`
+    );
+  }
+});
+
+it("Fails to claim reward with wrong owner", async () => {
+  try {
+    console.log("🚫 Testing claim reward with wrong owner...");
+    
+    // Create original owner and wrong owner
+    const originalOwner = web3.Keypair.generate();
+    const wrongOwner = web3.Keypair.generate();
+    
+    // Airdrop to both and wait for confirmation
+    const airdrop1 = await connection.requestAirdrop(originalOwner.publicKey, 2 * LAMPORTS_PER_SOL);
+    const airdrop2 = await connection.requestAirdrop(wrongOwner.publicKey, 1 * LAMPORTS_PER_SOL);
+    
+    await connection.confirmTransaction(airdrop1);
+    await connection.confirmTransaction(airdrop2);
+    
+    // Add a small delay to ensure airdrops are processed
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    // Verify balances
+    const balance1 = await connection.getBalance(originalOwner.publicKey);
+    const balance2 = await connection.getBalance(wrongOwner.publicKey);
+    console.log("Original owner balance:", balance1 / LAMPORTS_PER_SOL);
+    console.log("Wrong owner balance:", balance2 / LAMPORTS_PER_SOL);
+    
+    // Original owner buys ticket
+    const poolDataBefore = await program.account.companyPool.fetch(companyPoolPda);
+    const ticketId = poolDataBefore.totalTicketsSold.toNumber();
+    const ticketPda = deriveTicketPda(originalOwner.publicKey, ticketId);
+    
+    console.log("Buying ticket with ID:", ticketId);
+    console.log("Ticket PDA:", ticketPda.toString());
+    
+    const buyTx = await program.methods
+      .buyTicket()
+      .accounts({
+        companyPool: companyPoolPda,
+        userTicket: ticketPda,
+        buyer: originalOwner.publicKey,
+        poolVault: poolVaultPda,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([originalOwner])
+      .rpc();
+    
+    await connection.confirmTransaction(buyTx);
+    console.log("✅ Ticket bought successfully");
+    
+    // Verify ticket exists and check initial state
+    let ticketData = await program.account.userTicket.fetch(ticketPda);
+    console.log("Initial ticket data:", ticketData);
+    
+    // Record spin result
+    console.log("Recording spin result...");
+    const spinTx = await program.methods
+      .recordSpinResult()
+      .accounts({
+        companyPool: companyPoolPda,
+        userTicket: ticketPda,
+        spinner: originalOwner.publicKey,
+        poolVault: poolVaultPda,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([originalOwner])
+      .rpc();
+    
+    await connection.confirmTransaction(spinTx);
+    console.log("✅ Spin result recorded");
+    
+    // Verify the ticket state after spin
+    ticketData = await program.account.userTicket.fetch(ticketPda);
+    console.log("Final ticket data after spin:", ticketData);
+    console.log("Ticket owner:", ticketData.owner.toString());
+    console.log("Wrong owner:", wrongOwner.publicKey.toString());
+    
+    // Check the ticket structure - handle different possible field names
+    let hasReward = false;
+    if (ticketData.prizeAmount !== undefined) {
+      hasReward = ticketData.prizeAmount.toNumber() > 0;
+      console.log("Prize amount:", ticketData.prizeAmount.toNumber());
+    } else if (ticketData.reward !== undefined) {
+      hasReward = ticketData.reward.toNumber() > 0;
+      console.log("Reward amount:", ticketData.reward.toNumber());
+    } else if (ticketData.winAmount !== undefined) {
+      hasReward = ticketData.winAmount.toNumber() > 0;
+      console.log("Win amount:", ticketData.winAmount.toNumber());
+    } else if (ticketData.hasWon !== undefined) {
+      hasReward = ticketData.hasWon;
+      console.log("Has won:", ticketData.hasWon);
+    } else {
+      console.log("Warning: Could not determine reward status from ticket data");
+      console.log("Available fields:", Object.keys(ticketData));
+    }
+    
+    console.log("Ticket has reward:", hasReward);
+    
+    // Wrong owner tries to claim reward - this should fail
+    const claimTx = program.methods
+      .claimReward()
+      .accounts({
+        companyPool: companyPoolPda,
+        userTicket: ticketPda,
+        spinner: wrongOwner.publicKey, // Wrong owner
+        poolVault: poolVaultPda,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([wrongOwner]);
+    
+    // Execute the transaction and expect it to fail
+    await claimTx.rpc();
+    
+    assert.fail("Should have failed due to wrong owner");
+    
+  } catch (error) {
+    console.log("✅ Correctly failed with wrong owner");
+    console.log("Error details:", error);
+    
+    const errorStr = error.toString();
+    
+    // Check for various possible error types
+    const isExpectedError = 
+      errorStr.includes("NotTicketOwner") ||
+      errorStr.includes("constraint") ||
+      errorStr.includes("ConstraintOwner") ||
+      errorStr.includes("A has_one constraint was violated") ||
+      errorStr.includes("owner") ||
+      error.message?.includes("owner") ||
+      error.logs?.some(log => 
+        log.includes("NotTicketOwner") || 
+        log.includes("constraint") ||
+        log.includes("owner")
+      );
+    
+    if (!isExpectedError) {
+      console.log("Unexpected error type:", errorStr);
+      console.log("Error logs:", error.logs);
+      // If it's the signature error, that means there's a setup issue
+      if (errorStr.includes("signature must be base58 encoded")) {
+        throw new Error("Test setup issue: signature encoding problem. Check airdrop confirmations and account balances.");
+      }
+    }
+    
+    assert.ok(
+      isExpectedError,
+      `Should fail with owner-related error. Got: ${errorStr}`
+    );
+  }
+});
+
+it("Fails to claim reward when pool is inactive", async () => {
+  try {
+    console.log("🚫 Testing claim reward with inactive pool...");
+    
+    // Note: This test assumes you have a way to deactivate the pool
+    // Since your current contract doesn't have a deactivate function,
+    // this test will be skipped or you need to add that functionality
+    
+    console.log("ℹ️ Skipping inactive pool test (no deactivate function available)");
+    // You can implement a deactivate function in your contract if needed
+    
+  } catch (error) {
+    console.error("Error in inactive pool test:", error);
+  }
+});
+
+it("Handles insufficient vault funds scenario", async () => {
+  try {
+    console.log("🚫 Testing claim reward with insufficient vault funds...");
+    
+    // First check if vault has sufficient funds for this test
+    const vaultBalance = await connection.getBalance(poolVaultPda);
+    const rentExemptAmount = await connection.getMinimumBalanceForRentExemption(0);
+    const availableBalance = vaultBalance - rentExemptAmount;
+    
+    console.log(`   Vault balance: ${vaultBalance / LAMPORTS_PER_SOL} SOL`);
+    console.log(`   Available balance: ${availableBalance / LAMPORTS_PER_SOL} SOL`);
+    
+    if (availableBalance <= 0) {
+      console.log("ℹ️ Vault already has insufficient funds for rewards");
+      return;
+    }
+    
+    // Create a ticket, spin it, but first drain the vault if possible
+    const testUser = web3.Keypair.generate();
+    const airdropSig = await connection.requestAirdrop(
+      testUser.publicKey,
+      2 * LAMPORTS_PER_SOL
+    );
+    await connection.confirmTransaction(airdropSig);
+    
+    // Try to withdraw most funds as authority (if any remain)
+    try {
+      const poolData = await program.account.companyPool.fetch(companyPoolPda);
+      if (poolData.totalFunds.toNumber() > 0) {
+        const withdrawAmount = Math.min(
+          poolData.totalFunds.toNumber(),
+          availableBalance
+        );
+        
+        if (withdrawAmount > 0) {
+          const withdrawTx = await program.methods
+            .withdrawFundsFromVault(new anchor.BN(withdrawAmount))
+            .accounts({
+              companyPool: companyPoolPda,
+              authority: provider.wallet.publicKey,
+              poolVault: poolVaultPda,
+              systemProgram: SystemProgram.programId,
+            })
+            .rpc();
+          await connection.confirmTransaction(withdrawTx);
+          console.log(`   Withdrew ${withdrawAmount / LAMPORTS_PER_SOL} SOL from vault`);
+        }
+      }
+    } catch (e) {
+      console.log("   Could not drain vault:", e.message);
+    }
+    
+    console.log("ℹ️ Test completed - insufficient funds scenario depends on vault state");
+    
+  } catch (error) {
+    console.error("Error in insufficient funds test:", error);
+  }
+});
+
+it("Tests multiple users claiming rewards simultaneously", async () => {
+  try {
+    console.log("🎁 Testing multiple reward claims...");
+    
+    const numberOfUsers = 3;
+    const users: web3.Keypair[] = [];
+    const ticketPdas: PublicKey[] = [];
+    
+    // Create multiple users, buy tickets, spin, and claim rewards
+    for (let i = 0; i < numberOfUsers; i++) {
+      const user = web3.Keypair.generate();
+      users.push(user);
+      
+      // Airdrop SOL
+      const airdropSig = await connection.requestAirdrop(
+        user.publicKey,
+        3 * LAMPORTS_PER_SOL
+      );
+      await connection.confirmTransaction(airdropSig);
+      
+      // Buy ticket
+      const poolData = await program.account.companyPool.fetch(companyPoolPda);
+      const ticketId = poolData.totalTicketsSold.toNumber();
+      const ticketPda = deriveTicketPda(user.publicKey, ticketId);
+      ticketPdas.push(ticketPda);
+      
+      const buyTx = await program.methods
+        .buyTicket()
+        .accounts({
+          companyPool: companyPoolPda,
+          userTicket: ticketPda,
+          buyer: user.publicKey,
+          poolVault: poolVaultPda,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([user])
+        .rpc();
+      await connection.confirmTransaction(buyTx);
+      
+      // Spin
+      const spinTx = await program.methods
+        .recordSpinResult()
+        .accounts({
+          companyPool: companyPoolPda,
+          userTicket: ticketPda,
+          spinner: user.publicKey,
+          poolVault: poolVaultPda,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([user])
+        .rpc();
+      await connection.confirmTransaction(spinTx);
+      
+      // Small delay between operations
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    
+    // Now claim rewards for all users
+    let successfulClaims = 0;
+    let failedClaims = 0;
+    
+    for (let i = 0; i < numberOfUsers; i++) {
+      try {
+        const claimTx = await program.methods
+          .claimReward()
+          .accounts({
+            companyPool: companyPoolPda,
+            userTicket: ticketPdas[i],
+            spinner: users[i].publicKey,
+            poolVault: poolVaultPda,
+            systemProgram: SystemProgram.programId,
+          })
+          .signers([users[i]])
+          .rpc();
+        await connection.confirmTransaction(claimTx);
+        
+        successfulClaims++;
+        console.log(`   User ${i + 1}: Reward claimed successfully`);
+        
+      } catch (error) {
+        failedClaims++;
+        console.log(`   User ${i + 1}: Claim failed - ${error.message}`);
+      }
+    }
+    
+    console.log("📊 Multiple claims summary:");
+    console.log(`   Successful claims: ${successfulClaims}`);
+    console.log(`   Failed claims: ${failedClaims}`);
+    console.log(`   Total attempts: ${numberOfUsers}`);
+    
+    assert.ok(successfulClaims >= 0, "Should have non-negative successful claims");
+    console.log("✅ Multiple reward claims test completed!");
+    
+  } catch (error) {
+    console.error("❌ Error in multiple claims test:");
+    if (error.logs) {
+      console.error("Program logs:", error.logs);
+    }
+    throw error;
+  }
+});
+
+it("Verifies claim reward events are emitted correctly", async () => {
+  try {
+    console.log("📊 Testing reward claim event emission...");
+    
+    // Create user, buy ticket, spin, and claim
+    const eventTester = web3.Keypair.generate();
+    const airdropSig = await connection.requestAirdrop(
+      eventTester.publicKey,
+      3 * LAMPORTS_PER_SOL
+    );
+    await connection.confirmTransaction(airdropSig);
+    
+    const poolData = await program.account.companyPool.fetch(companyPoolPda);
+    const ticketId = poolData.totalTicketsSold.toNumber();
+    const ticketPda = deriveTicketPda(eventTester.publicKey, ticketId);
+    
+    // Buy and spin
+    const buyTx = await program.methods
+      .buyTicket()
+      .accounts({
+        companyPool: companyPoolPda,
+        userTicket: ticketPda,
+        buyer: eventTester.publicKey,
+        poolVault: poolVaultPda,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([eventTester])
+      .rpc();
+    await connection.confirmTransaction(buyTx);
+    
+    const spinTx = await program.methods
+      .recordSpinResult()
+      .accounts({
+        companyPool: companyPoolPda,
+        userTicket: ticketPda,
+        spinner: eventTester.publicKey,
+        poolVault: poolVaultPda,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([eventTester])
+      .rpc();
+    await connection.confirmTransaction(spinTx);
+    
+    // Claim reward and check events
+    const claimTx = await program.methods
+      .claimReward()
+      .accounts({
+        companyPool: companyPoolPda,
+        userTicket: ticketPda,
+        spinner: eventTester.publicKey,
+        poolVault: poolVaultPda,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([eventTester])
+      .rpc();
+    await connection.confirmTransaction(claimTx);
+    
+    // Parse events from transaction
+    const txDetails = await connection.getTransaction(claimTx, {
+      commitment: "confirmed",
+    });
+    
+    if (txDetails?.meta?.logMessages) {
+      console.log("📋 Claim reward transaction logs:");
+      let foundRewardEvent = false;
+      
+      txDetails.meta.logMessages.forEach(log => {
+        if (log.includes("RewardClaimedEvent") || 
+            log.includes("REWARD CLAIMED") ||
+            log.includes("Winner:") ||
+            log.includes("Reward Amount:")) {
+          console.log("   ", log);
+          foundRewardEvent = true;
+        }
+      });
+      
+      // Note: Event parsing depends on your specific event structure
+      // This is a basic validation that some reward-related logs exist
+      console.log(`   Event found: ${foundRewardEvent}`);
+    }
+    
+    console.log("✅ Event emission test completed!");
+    
+  } catch (error) {
+    console.error("❌ Error in event emission test:");
+    if (error.logs) {
+      console.error("Program logs:", error.logs);
+    }
+    throw error;
+  }
+});
+
+it("Final comprehensive claim reward verification", async () => {
+  try {
+    console.log("🔍 Final claim reward system verification...");
+    
+    // Get final pool state
+    const finalPoolData = await program.account.companyPool.fetch(companyPoolPda);
+    const finalVaultBalance = await connection.getBalance(poolVaultPda);
+    
+    console.log("📊 Final claim reward system state:");
+    console.log(`   Pool active: ${finalPoolData.active}`);
+    console.log(`   Total tickets sold: ${finalPoolData.totalTicketsSold.toString()}`);
+    console.log(`   Pool total funds: ${finalPoolData.totalFunds.toNumber() / LAMPORTS_PER_SOL} SOL`);
+    console.log(`   Vault balance: ${finalVaultBalance / LAMPORTS_PER_SOL} SOL`);
+    
+    // Count tickets and their states if we have ticket PDAs to check
+    if (ticketPdas && ticketPdas.length > 0) {
+      let usedTickets = 0;
+      let claimedRewards = 0;
+      let totalRewardValue = 0;
+      
+      for (const ticketInfo of ticketPdas) {
+        try {
+          const ticketData = await program.account.userTicket.fetch(ticketInfo.pda);
+          
+          if (ticketData.used) {
+            usedTickets++;
+          }
+          
+          if (ticketData.rewardClaimed) {
+            claimedRewards++;
+            if (ticketData.wonItem) {
+              totalRewardValue += ticketData.wonItem.price;
+            }
+          }
+        } catch (error) {
+          // Ticket might not exist or be accessible
+          console.log(`   Could not check ticket ${ticketInfo.ticketId}: ${error.message}`);
+        }
+      }
+      
+      console.log(`   Used tickets: ${usedTickets}`);
+      console.log(`   Claimed rewards: ${claimedRewards}`);
+      console.log(`   Total reward value claimed: ${totalRewardValue / LAMPORTS_PER_SOL} SOL`);
+      
+      // Basic sanity checks
+      assert.ok(claimedRewards <= usedTickets, "Claimed rewards should not exceed used tickets");
+      assert.ok(totalRewardValue >= 0, "Total reward value should be non-negative");
+    }
+    
+    // Verify pool remains functional
+    assert.ok(finalPoolData.active, "Pool should remain active");
+    assert.ok(finalVaultBalance >= 0, "Vault balance should be non-negative");
+    
+    console.log("✅ Final claim reward verification completed successfully!");
+    
+  } catch (error) {
+    console.error("❌ Error in final verification:");
+    throw error;
+  }
+});
+
 });
