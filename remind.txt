@@ -81,3 +81,13 @@ Webhook integrations (Discord/Telegram notifications)
 Advanced analytics (profit/loss charts)
 A/B testing (different probability sets)
 VIP tiers (better odds for big spenders)
+
+
+
+Deploying cluster: https://api.devnet.solana.com
+Upgrade authority: /home/banti/.config/solana/id.json
+Deploying program "company_pool"...
+Program path: /mnt/x/Web3-100-Project/spinToWin/contract/target/deploy/company_pool.so...
+Program Id: 6fqRppPtwd8E51BLjgtSAi4vfM4DHN3MbtetETU6De1p
+
+Signature: 4KpZhZjXhUkvSiXFuwa6cze8q4Q5SyFtH3Tacrc9sivxdPeNgHeGgnccUqAT3NzFoNQpdak3QZVAfbF9zPVkMzWg
