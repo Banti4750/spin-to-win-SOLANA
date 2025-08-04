@@ -12,14 +12,11 @@ company_pool = "3z5DJ8k16cB8oAtbS45ye4PdtFQZBrFjNKhqks2AAxxr"
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "localnet"
+cluster = "devnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
 test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
 
 [workspace]
-members = [
-  "programs/contract"
-]
-
+members = ["programs/contract"]
